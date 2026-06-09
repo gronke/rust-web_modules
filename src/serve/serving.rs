@@ -51,15 +51,29 @@ pub(crate) fn content_type(path: &str) -> String {
         .to_string()
 }
 
-/// Whether `path`'s extension marks it as a *source* the toolchain compiles rather
-/// than serves (`.ts`/`.tsx`/`.mts`/`.scss`/`.tera`). Such originals are kept out of
-/// HTTP responses — the client only ever gets the compiled target.
+/// Extensions of *source* files the toolchain compiles rather than serves: `.ts`/
+/// `.tsx`/`.mts` → `.js`, `.scss` → `.css`, `.tera` → its rendered target. Such
+/// originals are kept out of HTTP responses — the client only ever gets the compiled
+/// output.
+const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "tera"];
+
+/// Whether `path`'s extension marks it as a [source file](SOURCE_EXTENSIONS), matched
+/// **case-insensitively**. Case matters for safety: on a case-insensitive filesystem
+/// (macOS, Windows) a request for `app.SCSS` resolves to the on-disk `app.scss`, so a
+/// case-sensitive guard would hand back the raw source.
 pub(crate) fn is_source_file(path: &str) -> bool {
-    Path::new(path)
-        .extension()
+    has_source_extension(Path::new(path))
+}
+
+/// Like [`is_source_file`], but on a resolved [`Path`]. Apply this to the path a request
+/// actually resolved to (after `canonicalize`), so OS-level name folding the request
+/// string didn't reveal — case folding, or a Windows trailing `.`/space — can't smuggle a
+/// source past the guard.
+pub(crate) fn has_source_extension(path: &Path) -> bool {
+    path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| {
-            ["ts", "tsx", "mts", "scss", "tera"]
+            SOURCE_EXTENSIONS
                 .iter()
                 .any(|s| ext.eq_ignore_ascii_case(s))
         })
@@ -100,6 +114,33 @@ mod tests {
         assert!(!is_source_file("app.css"));
         assert!(!is_source_file("index.html"));
         assert!(!is_source_file("logo.svg"));
+    }
+
+    #[test]
+    fn is_source_file_is_case_insensitive() {
+        // On a case-insensitive FS (macOS, Windows) `app.SCSS` opens `app.scss`, so the
+        // guard must flag case variants too — else the raw source leaks.
+        assert!(is_source_file("app.SCSS"));
+        assert!(is_source_file("App.Scss"));
+        assert!(is_source_file("main.TS"));
+        assert!(is_source_file("x.TSX"));
+        assert!(is_source_file("y.MTS"));
+        assert!(is_source_file("page.html.TERA"));
+    }
+
+    #[test]
+    fn has_source_extension_checks_resolved_paths() {
+        // Same rule applied to a resolved (canonicalised) path — what the disk-backed
+        // routers test on the file they actually opened.
+        assert!(has_source_extension(Path::new("/abs/web/app.scss")));
+        assert!(has_source_extension(Path::new("/abs/web/app.SCSS")));
+        assert!(has_source_extension(Path::new("main.TS")));
+        assert!(!has_source_extension(Path::new("/abs/web/app.css")));
+        assert!(!has_source_extension(Path::new("/abs/web/app.js")));
+        // A `.gz` extension is not itself a source; the gz path is de-gzipped by the
+        // caller (via `file_stem`) before this check.
+        assert!(!has_source_extension(Path::new("/abs/web/app.css.gz")));
+        assert!(!has_source_extension(Path::new("/abs/web/noext")));
     }
 
     #[test]
