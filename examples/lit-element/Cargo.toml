@@ -15,5 +15,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 include_dir = "0.7"
 
 [build-dependencies]
-# Build-time baking only needs the compilers — no axum/tokio.
-web_modules = { path = "../..", default-features = false, features = ["typescript", "scss"] }
+# Build-time baking needs the compilers + Tera (renders web/index.html.tera) — no axum/tokio.
+web_modules = { path = "../..", default-features = false, features = ["typescript", "scss", "tera"] }

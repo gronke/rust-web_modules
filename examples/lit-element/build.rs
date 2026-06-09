@@ -1,6 +1,7 @@
 //! Bakes the frontend at build time: vendors the npm dependencies, transforms
-//! `web/*.ts` and compiles `web/*.scss`, and renders `index.html` with the import
-//! map — all into `$OUT_DIR/dist`, which `main.rs` embeds with `include_dir!`.
+//! `web/*.ts` and compiles `web/*.scss`, and renders `web/index.html.tera` (a Tera
+//! template, with the import map injected) — all into `$OUT_DIR/dist`, which `main.rs`
+//! embeds with `include_dir!`.
 //!
 //! The browser dependencies are sourced from `web/package.json` (`dependencies`),
 //! so they're maintained like any npm project; `devDependencies` there (tooling)
@@ -11,24 +12,6 @@ use std::path::PathBuf;
 
 use web_modules::build::{build, BuildOptions};
 use web_modules::vendor::{specs_from_package_json, PackageSpec};
-
-const HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>web-modules · Lit + Bootstrap</title>
-<script src="/web_modules/@webcomponents/webcomponentsjs/webcomponents-loader.js"></script>
-<link rel="stylesheet" href="/web_modules/bootstrap/dist/css/bootstrap.min.css">
-<link rel="stylesheet" href="/styles.css">
-{importmap}
-<script type="module" src="/app.js"></script>
-</head>
-<body class="py-5 bg-body-tertiary">
-<counter-card count="3"></counter-card>
-</body>
-</html>
-"#;
 
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -56,8 +39,10 @@ fn main() {
         src: &manifest.join("web"),
         out: &out,
         mount: "/web_modules",
-        html: HTML,
-        template: None,
+        // Render the page from a Tera template; `{{ importmap | safe }}` becomes the
+        // generated <script type="importmap">. (`html` is unused when `template` is set.)
+        html: "",
+        template: Some(&manifest.join("web/index.html.tera")),
         output: Default::default(),
     })
     .expect("build lit-element frontend");
