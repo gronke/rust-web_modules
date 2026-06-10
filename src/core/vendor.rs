@@ -215,13 +215,76 @@ impl PackageSpec {
 /// Only `dependencies` is read — `devDependencies` (build/test tooling such as
 /// `typescript` or `@playwright/test`) are **not** vended. To include other
 /// sections, use [`specs_from_package_json_sections`].
+///
+/// # `webDependencies` whitelist
+///
+/// When `dependencies` also carries server-only packages, narrow the browser vend
+/// with a `webDependencies` whitelist under the `web-modules` key — the convention
+/// [@pika/web] / Snowpack introduced for exactly this (*"useful if your entire
+/// dependencies object is too large or contains unrelated, server-only packages"*):
+///
+/// ```json
+/// { "dependencies": { "lit": "^3", "pg": "^8" },
+///   "web-modules": { "webDependencies": ["lit"] } }
+/// ```
+///
+/// Only the listed names are vended (in order; versions still come from
+/// `dependencies`); a listed name absent from `dependencies` is an error. Without
+/// the key, every `dependency` is vended.
+///
+/// [@pika/web]: https://www.npmjs.com/package/@pika/web
 pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
-    specs_from_package_json_sections(path, &["dependencies"])
+    let bytes = std::fs::read(path)?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Vendor(format!("{}: {e}", path.display())))?;
+    // `web-modules.webDependencies`: an @pika/web-style whitelist of dependency
+    // names to vend (versions taken from `dependencies`). Absent → vend all of
+    // `dependencies`.
+    let Some(whitelist) = json
+        .get("web-modules")
+        .and_then(|v| v.get("webDependencies"))
+    else {
+        return specs_from_package_json_sections(path, &["dependencies"]);
+    };
+    let whitelist = whitelist.as_array().ok_or_else(|| {
+        Error::Vendor(format!(
+            "{}: web-modules.webDependencies must be an array of dependency names",
+            path.display()
+        ))
+    })?;
+    let deps = json.get("dependencies").and_then(|v| v.as_object());
+    let mut specs = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in whitelist {
+        let Some(name) = entry.as_str() else {
+            return Err(Error::Vendor(format!(
+                "{}: web-modules.webDependencies entries must be strings",
+                path.display()
+            )));
+        };
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let value = deps
+            .and_then(|d| d.get(name))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                Error::Vendor(format!(
+                    "{}: web-modules.webDependencies lists `{name}`, not found in dependencies",
+                    path.display()
+                ))
+            })?;
+        if let Some(spec) = dep_to_spec(name, value) {
+            specs.push(spec);
+        }
+    }
+    Ok(specs)
 }
 
 /// Like [`specs_from_package_json`], but read the named dependency `sections`
 /// (e.g. `&["dependencies", "devDependencies"]`). The first section to name a
-/// package wins; later duplicates are dropped.
+/// package wins; later duplicates are dropped. The `webDependencies` whitelist is
+/// **not** applied — that is [`specs_from_package_json`]'s browser-vend rule.
 pub fn specs_from_package_json_sections(
     path: &Path,
     sections: &[&str],
@@ -239,16 +302,29 @@ pub fn specs_from_package_json_sections(
             let Some(value) = value.as_str() else {
                 continue;
             };
-            if is_local_protocol(value) || !seen.insert(name.clone()) {
+            let Some(spec) = dep_to_spec(name, value) else {
                 continue;
+            };
+            if seen.insert(name.clone()) {
+                specs.push(spec);
             }
-            specs.push(match parse_github_dep(value) {
-                Some((repo, reference)) => PackageSpec::git(repo, reference),
-                None => PackageSpec::npm(name.as_str(), value),
-            });
         }
     }
     Ok(specs)
+}
+
+/// Turn one `package.json` dependency entry (`name` → `value`) into a vendoring
+/// [`PackageSpec`]: a `github:` / git URL → a [git](PackageSpec::git) spec; a local
+/// protocol (`file:`/`link:`/`workspace:`/`portal:`) → `None` (nothing to vend);
+/// anything else → a registry [npm](PackageSpec::npm) spec, range verbatim.
+fn dep_to_spec(name: &str, value: &str) -> Option<PackageSpec> {
+    if is_local_protocol(value) {
+        return None;
+    }
+    Some(match parse_github_dep(value) {
+        Some((repo, reference)) => PackageSpec::git(repo, reference),
+        None => PackageSpec::npm(name, value),
+    })
 }
 
 /// A `package.json` value pointing at a local path rather than a registry/git
@@ -793,6 +869,69 @@ mod tests {
             specs_from_package_json_sections(&p, &["dependencies", "devDependencies"]).unwrap();
         let names: Vec<&str> = specs.iter().map(PackageSpec::name).collect();
         assert!(names.contains(&"lit") && names.contains(&"typescript"));
+    }
+
+    #[test]
+    fn web_dependencies_whitelist_narrows_to_named_subset() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{
+                "dependencies": { "lit": "^3", "lit-html": "^3", "pg": "^8" },
+                "web-modules": { "webDependencies": ["lit", "lit-html"] }
+            }"#,
+        )
+        .unwrap();
+        let specs = specs_from_package_json(&p).unwrap();
+        let names: Vec<&str> = specs.iter().map(PackageSpec::name).collect();
+        assert_eq!(names, vec!["lit", "lit-html"], "whitelist order preserved");
+        assert!(
+            !names.contains(&"pg"),
+            "server-only dep left out of the browser vend"
+        );
+    }
+
+    #[test]
+    fn web_dependencies_whitelist_naming_a_missing_dep_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":["lit","nope"]}}"#,
+        )
+        .unwrap();
+        let Err(err) = specs_from_package_json(&p) else {
+            panic!("expected an error for the missing dep");
+        };
+        assert!(
+            err.to_string().contains("nope"),
+            "error names the missing dep: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_web_dependencies_vends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":[]}}"#,
+        )
+        .unwrap();
+        assert!(specs_from_package_json(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn web_dependencies_must_be_an_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":{"lit":"^3"}}}"#,
+        )
+        .unwrap();
+        assert!(specs_from_package_json(&p).is_err(), "object form rejected");
     }
 
     #[test]
