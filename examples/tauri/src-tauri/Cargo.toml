@@ -18,5 +18,8 @@ tauri = { version = "2", features = [] }
 web_modules = { path = "../../..", features = ["dev"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+# Pin below the time 0.3.48 coherence break (E0119 in tauri-utils 2.9.2 + cookie 0.18.1).
+time = ">=0.3, <0.3.48"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
