@@ -99,6 +99,14 @@ pub use serve::server;
 #[cfg(feature = "axum")]
 pub use serve::server::{serve, Frontend};
 
+/// Per-request CSP nonce middleware (feature `csp`): [`CspNonceLayer`] mints a nonce, exposes
+/// it via [`CspNonce`] in the request extensions, and emits a `Content-Security-Policy` header
+/// that authorises it — so inline `<script>`/`<style>` work without `'unsafe-inline'`.
+#[cfg(feature = "csp")]
+pub use serve::csp;
+#[cfg(feature = "csp")]
+pub use serve::csp::{CspNonce, CspNonceLayer};
+
 /// Re-export of the `include_dir` crate for the [`include_dir::Dir`] type. Use the
 /// `include_dir` crate **directly** for the `include_dir!` macro — it emits
 /// `include_dir::`-qualified paths that don't resolve through a re-export.

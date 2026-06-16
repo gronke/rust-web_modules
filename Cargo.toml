@@ -52,6 +52,11 @@ axum = ["dep:axum", "dep:tokio", "dep:mime_guess", "dep:include_dir"]
 # Dev server on top of `axum`: compile TS/SCSS on the fly, watch the source tree,
 # live-reload the browser.
 dev = ["axum", "typescript", "scss", "dep:notify", "dep:tower-livereload"]
+# Per-request CSP nonce middleware (`CspNonceLayer`): mint a nonce, expose it via request
+# extensions, and emit a `Content-Security-Policy` header authorising exactly that nonce — so
+# inline `<script>`/`<style>` work via `'nonce-…'` instead of `'unsafe-inline'`. Builds on the
+# `axum` integration; adds only the two tower trait crates + an OS CSPRNG.
+csp = ["axum", "dep:getrandom", "dep:tower-layer", "dep:tower-service"]
 # The `web-modules` CLI binary (dev / compile / vendor / ci / npm). `npm-utils/cli` powers the
 # `npm` passthrough; it stays behind this opt-in feature so the library path never pulls clap.
 cli = ["dev", "minify", "dep:clap", "npm-utils/cli"]
@@ -66,7 +71,7 @@ npm = []
 bundle = ["dep:rolldown", "dep:tokio"]
 # Everything in the lean toolchain. The heavy, opt-in `bundle` is intentionally NOT included, so
 # `full` (and `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "npm"]
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "npm", "csp"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`
@@ -105,6 +110,12 @@ notify = { version = "8", optional = true }
 tower-livereload = { version = "0.10", optional = true }
 mime_guess = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+
+# CSP nonce middleware (the `csp` feature): the two tower trait crates (Layer/Service) plus an
+# OS CSPRNG for the nonce. All tiny and optional — off the build-only path.
+tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
+getrandom = { version = "0.2", optional = true }
 
 # CommonJS→ESM bundling (the `bundle` feature): the embedded, oxc-based Rust bundler. Heavy
 # (pulls a second oxc + the rolldown tree), so it's optional and off by default.
