@@ -1,4 +1,4 @@
-#![cfg(feature = "bundle")]
+#![cfg(all(feature = "bundle", feature = "npm"))]
 //! Integration tests for the `bundle` feature — they double as documentation of the CommonJS→ESM
 //! pipeline: install a `node_modules/` tree with npm-utils, then bundle it with rolldown into one
 //! self-contained browser ES module. Entirely pure Rust — no Node at any step.
@@ -7,7 +7,7 @@
 //! run them with the feature and `--include-ignored`:
 //!
 //! ```text
-//! cargo test --features bundle --test bundle -- --include-ignored
+//! cargo test --features "bundle npm" --test bundle -- --include-ignored
 //! ```
 
 use web_modules::bundle::{bundle, BundleOptions};
@@ -40,7 +40,7 @@ fn bundle_app(deps: &str, app_jsx: &str, production: bool) -> String {
     std::fs::write(web.join("app.jsx"), app_jsx).unwrap();
 
     // 1. Install the transitive dependency tree into web/node_modules/ (npm-utils — pure Rust).
-    web_modules::npm_utils::install::node_modules(&web.join("package.json"), web).unwrap();
+    web_modules::npm::install::node_modules(&web.join("package.json"), web).unwrap();
     // 2. Bundle the entry + node_modules into one browser ES module (rolldown — pure Rust).
     let out = web.join("dist");
     bundle(&BundleOptions {

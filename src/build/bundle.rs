@@ -8,7 +8,7 @@
 //! Node: rolldown runs in-process.
 //!
 //! The dependencies must already be installed under `<cwd>/node_modules/`; pair this with
-//! [`npm_utils::install::node_modules`] (re-exported as [`crate::npm_utils`]) for the full,
+//! [`npm_utils::install::node_modules`] (re-exported as [`crate::npm`]) for the full,
 //! pure-Rust pipeline:
 //!
 //! ```no_run
@@ -18,7 +18,7 @@
 //! # fn main() -> web_modules::Result<()> {
 //! let web = Path::new("web");
 //! // 1. Install the (transitive) dependency tree into web/node_modules/ — pure Rust, no npm.
-//! web_modules::npm_utils::install::node_modules(&web.join("package.json"), web)
+//! web_modules::npm::install::node_modules(&web.join("package.json"), web)
 //!     .map_err(|e| web_modules::Error::Bundle(e.to_string()))?;
 //! // 2. Bundle the app entry + everything it imports from node_modules/ into one browser ES module.
 //! bundle(&BundleOptions {
@@ -46,7 +46,7 @@ pub struct BundleOptions<'a> {
     /// The application entry module (e.g. `web/app.tsx`). rolldown's oxc transforms its JSX/TS.
     pub entry: &'a Path,
     /// Module-resolution root — the directory whose `node_modules/` holds the dependencies (usually
-    /// your `web/` dir). Install it first with [`npm_utils::install::node_modules`].
+    /// your `web/` dir). Install it first with [`crate::npm::install::node_modules`].
     pub cwd: &'a Path,
     /// Directory the bundled `.js` (named after the entry, e.g. `app.js`) is written to.
     pub out_dir: &'a Path,
