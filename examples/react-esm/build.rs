@@ -1,6 +1,6 @@
 //! Build pipeline for the `react-esm` example — entirely pure Rust, no Node, no CDN:
 //!
-//!   1. `npm_utils::install::node_modules` installs react + react-dom + zustand (all
+//!   1. `web_modules::npm::install::node_modules` installs react + react-dom + zustand (all
 //!      CommonJS) into `web/node_modules/` — the "npm install", in Rust.
 //!   2. `web_modules::bundle::bundle` bundles `web/app.tsx` plus that `node_modules/` tree
 //!      into ONE browser ES module (`$OUT_DIR/dist/app.js`) with rolldown: CommonJS→ESM,
@@ -36,7 +36,7 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
 
     // 1. Install the (transitive) dependency tree into web/node_modules/ — pure Rust, no npm.
-    web_modules::npm_utils::install::node_modules(&web.join("package.json"), &web)
+    web_modules::npm::install::node_modules(&web.join("package.json"), &web)
         .expect("install react/react-dom/zustand into web/node_modules");
 
     // 2. Bundle the entry + node_modules into one browser ES module (rolldown — pure Rust).

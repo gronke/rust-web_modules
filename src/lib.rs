@@ -80,11 +80,12 @@ pub use build::compress;
 #[cfg(feature = "tera")]
 pub use build::templates;
 
-/// Re-export of [`npm_utils`] (the vendoring + transitive `node_modules` install engine) under the
-/// `bundle` feature, so the CommonJS→ESM pipeline is a single dependency: install with
-/// `web_modules::npm_utils::install::node_modules`, then [`bundle::bundle`].
-#[cfg(feature = "bundle")]
-pub use npm_utils;
+/// Re-export of [`npm_utils`] as `web_modules::npm` — the vendoring + transitive `node_modules`
+/// install engine — behind the `npm` feature. Lets consumers reach the npm API without a separate
+/// `npm-utils` dependency: install a tree with `web_modules::npm::install::node_modules`, then
+/// bundle it via `web_modules::bundle` (enable the `bundle` feature too).
+#[cfg(feature = "npm")]
+pub use npm_utils as npm;
 
 // Runtime serving, grouped under `serve/`: the axum `Frontend` router and the dev server,
 // over a shared (private) `serving` containment boundary. Re-exported at historical paths.

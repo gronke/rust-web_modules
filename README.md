@@ -22,6 +22,7 @@ Each is a Cargo `--features` flag:
 - **minify · dts · i18n · icons** - optional processors
 - **compress** - gzip sidecars for static serving
 - **bundle** - CommonJS to ESM
+- **npm** - expose the `npm-utils` API as `web_modules::npm` (resolve · install · ci)
 - **axum · dev** - serve the frontend, with a live-reload dev server
 
 ## CLI

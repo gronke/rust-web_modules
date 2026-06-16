@@ -23,7 +23,7 @@ next door shows the *other* answer: load React's UMD build as a global, no bundl
 
 ## How it works (all in `build.rs`, pure Rust)
 
-1. **install** — `web_modules::npm_utils::install::node_modules` resolves and installs
+1. **install** — `web_modules::npm::install::node_modules` resolves and installs
    `react`, `react-dom` and `zustand` (the transitive tree, CommonJS and all) into
    `web/node_modules/`. This is a real "npm install", implemented in Rust.
 2. **bundle** — `web_modules::bundle::bundle` runs rolldown over `web/app.tsx` + that

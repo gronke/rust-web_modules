@@ -19,6 +19,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 include_dir = "0.7"
 
 [build-dependencies]
-# Build-time only: install node_modules (npm-utils, re-exported under `bundle`) + bundle
-# CommonJS→ESM (rolldown). This is the only place rolldown is compiled.
-web_modules = { path = "../..", default-features = false, features = ["bundle"] }
+# Build-time only: install node_modules (the `npm` re-export) + bundle CommonJS→ESM
+# (`bundle`/rolldown). This is the only place rolldown is compiled.
+web_modules = { path = "../..", default-features = false, features = ["bundle", "npm"] }
