@@ -1,6 +1,8 @@
-//! `web-modules` CLI: `dev` (dev server), `compile` (compile root(s) to an output dir),
-//! `vendor` (vendor npm into `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm`
-//! (delegates to npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature.
+//! `web-modules` CLI: `dev` (dev server), `compile` (compile root(s) to an output dir), `build`
+//! (the full vendor→transform→render pipeline into a deployable `dist/`), `vendor` (vendor npm
+//! into `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm` (delegates to
+//! npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature; the opt-in `env` feature
+//! adds `WEB_MODULES_*` environment-variable config to `build`.
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -11,6 +13,11 @@ use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
 type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// `build`'s default inline `index.html`. The entry script is RELATIVE (`./app.js`) so the page
+/// also loads under a subpath (e.g. a GitHub *project* page served at `/<repo>/`). The literal
+/// `{importmap}` is replaced with the generated import-map `<script>`.
+const DEFAULT_HTML: &str = "<!doctype html>{importmap}<script type=module src=./app.js></script>";
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +59,69 @@ enum Command {
         /// Minify emitted `.js`.
         #[arg(long)]
         minify: bool,
+    },
+    /// Build a complete, deployable `dist/` - the full vendor→transform→render pipeline.
+    ///
+    /// Vendor npm into `web_modules/`, transform TS, compile SCSS, copy static files, vendor the
+    /// transform runtime, and render `index.html` with the import map injected - the CLI surface of
+    /// `web_modules::build::build()`. Packages come from positional `name@range` specs and/or the
+    /// `dependencies` of `--manifest` package.json(s), exactly like `vendor`. The page renders from
+    /// inline `--html` (its literal `{importmap}` is replaced) or, with `--template`, a Tera template
+    /// (rendered with an `importmap` variable). With the opt-in `env` feature each flag also reads a
+    /// `WEB_MODULES_*` environment variable; an explicit flag wins over the variable.
+    Build {
+        /// Source directory: TypeScript, SCSS, HTML and other static files.
+        #[cfg_attr(
+            feature = "env",
+            arg(long, env = "WEB_MODULES_SRC", default_value = "web")
+        )]
+        #[cfg_attr(not(feature = "env"), arg(long, default_value = "web"))]
+        src: PathBuf,
+        /// Output (`dist/`) directory.
+        #[cfg_attr(
+            feature = "env",
+            arg(long, env = "WEB_MODULES_OUT", default_value = "dist")
+        )]
+        #[cfg_attr(not(feature = "env"), arg(long, default_value = "dist"))]
+        out: PathBuf,
+        /// URL prefix the vendored modules are served at. Under a GitHub *project* page (served at
+        /// `/<repo>/`) pass `/<repo>/web_modules`.
+        #[cfg_attr(
+            feature = "env",
+            arg(long, env = "WEB_MODULES_MOUNT", default_value = "/web_modules")
+        )]
+        #[cfg_attr(not(feature = "env"), arg(long, default_value = "/web_modules"))]
+        mount: String,
+        /// Inline `index.html`; `{importmap}` is replaced with the import-map `<script>`. Keep
+        /// entry scripts RELATIVE (`./app.js`) so the page works under a subpath. Ignored when
+        /// `--template` is given.
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_HTML", default_value_t = DEFAULT_HTML.to_owned()))]
+        #[cfg_attr(not(feature = "env"), arg(long, default_value_t = DEFAULT_HTML.to_owned()))]
+        html: String,
+        /// Tera template file, rendered with an `importmap` variable, instead of `--html`.
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_TEMPLATE"))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        template: Option<PathBuf>,
+        /// Minify the emitted `.js`.
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_MINIFY", default_value = "false",
+            num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = parse_bool))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        minify: bool,
+        /// Write `<file>.gz` sidecars (requires the `compress` feature; ignored without it).
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_GZIP", default_value = "false",
+            num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = parse_bool))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        gzip: bool,
+        /// Also vendor the `dependencies` of this `package.json` (repeatable).
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_MANIFEST"))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        manifest: Vec<PathBuf>,
+        /// Packages as `name` or `name@range` (e.g. `lit@^3`). Optional when `--manifest` is given.
+        #[cfg_attr(
+            feature = "env",
+            arg(env = "WEB_MODULES_PACKAGES", value_delimiter = ' ')
+        )]
+        packages: Vec<String>,
     },
     /// Vendor npm packages into web_modules/ + an import map.
     ///
@@ -122,6 +192,21 @@ fn parse_spec(p: &str) -> PackageSpec {
     }
 }
 
+/// Permissive boolean parser for the `env`-driven `--minify`/`--gzip` flags. A plain `bool` arg is
+/// presence-only (`SetTrue`), so `WEB_MODULES_MINIFY=false` would *enable* it; routing the value
+/// through here instead honours an explicit `false`. Accepts the GitHub Actions booleans
+/// (`true`/`false`) plus the usual `1/0`, `yes/no`, `on/off`, case-insensitively.
+#[cfg(feature = "env")]
+fn parse_bool(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "expected a boolean (true/false, 1/0, yes/no, on/off), got {other:?}"
+        )),
+    }
+}
+
 /// Build vendor's spec set from positional `name@range` specs plus each `--manifest`
 /// package.json's `dependencies`. A positional spec wins over a same-named manifest entry.
 /// Errors when neither source yields a package.
@@ -187,6 +272,48 @@ async fn main() -> Res {
                 roots.len(),
                 out.display(),
                 if minify { " (minified)" } else { "" },
+            );
+        }
+        Command::Build {
+            src,
+            out,
+            mount,
+            html,
+            template,
+            minify,
+            gzip,
+            manifest,
+            packages,
+        } => {
+            // Same spec assembly as `vendor`: positional specs plus each `--manifest`'s
+            // dependencies, with a positional winning over a same-named manifest entry.
+            let specs = build_vendor_specs(&packages, &manifest)?;
+            // `--gzip` only does anything with the `compress` feature compiled in; be loud rather
+            // than silently dropping it.
+            #[cfg(not(feature = "compress"))]
+            if gzip {
+                eprintln!(
+                    "web-modules: --gzip ignored - built without the `compress` feature \
+                     (reinstall with `--features cli,compress`)"
+                );
+            }
+            // The full pipeline (vendor + transform + render), shared with consumer build scripts.
+            web_modules::build::build(&web_modules::build::BuildOptions {
+                specs: &specs,
+                src: &src,
+                out: &out,
+                mount: &mount,
+                html: &html,
+                template: template.as_deref(),
+                // `Output` is `#[non_exhaustive]`, so build it via the constructor, not a literal.
+                output: web_modules::build::Output::new(minify, gzip),
+            })?;
+            println!(
+                "built dist → {} ({} package spec(s), mount {mount}{}{})",
+                out.display(),
+                specs.len(),
+                if minify { ", minified" } else { "" },
+                if gzip { ", gzipped" } else { "" },
             );
         }
         Command::Vendor {
@@ -314,5 +441,90 @@ mod tests {
             build_vendor_specs(&["lit@^3".into()], std::slice::from_ref(&manifest)).unwrap();
         // lit (positional, first) then ms (manifest); the manifest's lit is deduped out.
         assert_eq!(names(&specs), ["lit", "ms"]);
+    }
+
+    #[test]
+    fn build_parses_positional_specs_and_flags() {
+        let cli = Cli::try_parse_from([
+            "web-modules",
+            "build",
+            "lit@^3",
+            "@lit/context@^1",
+            "--src",
+            "web",
+            "--out",
+            "dist",
+            "--mount",
+            "/repo/web_modules",
+            "--minify",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Build {
+                src,
+                out,
+                mount,
+                minify,
+                packages,
+                ..
+            } => {
+                assert_eq!(src, PathBuf::from("web"));
+                assert_eq!(out, PathBuf::from("dist"));
+                assert_eq!(mount, "/repo/web_modules");
+                assert!(minify);
+                assert_eq!(packages, ["lit@^3", "@lit/context@^1"]);
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_defaults_are_web_dist_and_flags_off() {
+        let cli = Cli::try_parse_from(["web-modules", "build", "lit@^3"]).unwrap();
+        match cli.command {
+            Command::Build {
+                src,
+                out,
+                mount,
+                minify,
+                gzip,
+                ..
+            } => {
+                assert_eq!(src, PathBuf::from("web"));
+                assert_eq!(out, PathBuf::from("dist"));
+                assert_eq!(mount, "/web_modules");
+                assert!(!minify && !gzip, "minify/gzip default off");
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[cfg(feature = "env")]
+    #[test]
+    fn parse_bool_accepts_common_forms() {
+        for t in ["1", "true", "TRUE", "Yes", "on"] {
+            assert_eq!(parse_bool(t), Ok(true), "{t:?} should be true");
+        }
+        for f in ["0", "false", "FALSE", "No", "off"] {
+            assert_eq!(parse_bool(f), Ok(false), "{f:?} should be false");
+        }
+        assert!(parse_bool("maybe").is_err());
+    }
+
+    #[cfg(feature = "env")]
+    #[test]
+    fn build_minify_env_false_is_honored() {
+        // The bool-via-env gotcha: a presence-only `SetTrue` flag would read the var's mere
+        // existence as `true`. The parsed-value form must honour the *value*. No `--minify` on the
+        // argv, so the env var is the only source. (No other test writes this var, so no race.)
+        std::env::set_var("WEB_MODULES_MINIFY", "false");
+        let parsed = Cli::try_parse_from(["web-modules", "build", "lit@^3"]);
+        std::env::remove_var("WEB_MODULES_MINIFY");
+        match parsed.unwrap().command {
+            Command::Build { minify, .. } => {
+                assert!(!minify, "WEB_MODULES_MINIFY=false must stay false")
+            }
+            _ => panic!("expected Build"),
+        }
     }
 }

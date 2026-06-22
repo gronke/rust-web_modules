@@ -62,20 +62,34 @@ pub struct Output {
 }
 
 impl Output {
+    /// Construct from explicit toggles. Use this (or [`Output::default`] for both off and
+    /// [`Output::optimized`] for both on) since `Output` is `#[non_exhaustive]` and so can't be
+    /// built field-by-field from other crates — including this crate's own `web-modules` binary,
+    /// which maps the CLI's `--minify`/`--gzip` flags through here.
+    pub fn new(minify: bool, gzip: bool) -> Self {
+        Self { minify, gzip }
+    }
+
     /// The production preset: minify the emitted JS **and** write `.gz` sidecars (both
-    /// toggles on). Use this, or [`Output::default`] (both off), since `Output`
-    /// is `#[non_exhaustive]` and so can't be built field-by-field from other crates.
-    /// Takes full effect with the `minify` and `compress` features.
+    /// toggles on). Equivalent to `Output::new(true, true)`. Takes full effect with the
+    /// `minify` and `compress` features.
     pub fn optimized() -> Self {
-        Self {
-            minify: true,
-            gzip: true,
-        }
+        Self::new(true, true)
+    }
+}
+
+/// Emit a `cargo:rerun-if-changed` line — but only when running as a build script, which cargo
+/// signals by setting `OUT_DIR`. Outside a build script (e.g. the `web-modules build` subcommand
+/// reusing this pipeline) the directive is meaningless and would just spew one line per source
+/// file to the CLI's stdout, so it's suppressed.
+fn rerun_if_changed(path: &Path) {
+    if std::env::var_os("OUT_DIR").is_some() {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }
 
 /// Vendor + transform + compile + render into `out`, ready to embed and serve.
-/// Emits `cargo:rerun-if-changed` for the source dir.
+/// In a build script (cargo sets `OUT_DIR`) also emits `cargo:rerun-if-changed` for the source tree.
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     std::fs::create_dir_all(opts.out)?;
     let mut importmap = vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?;
@@ -114,7 +128,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
 
     let html = match opts.template {
         Some(template) => {
-            println!("cargo:rerun-if-changed={}", template.display());
+            rerun_if_changed(template);
             render_template(template, &importmap)?
         }
         None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
@@ -134,7 +148,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        println!("cargo:rerun-if-changed={}", entry.path().display());
+        rerun_if_changed(entry.path());
     }
     Ok(())
 }
