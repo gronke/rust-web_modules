@@ -7,9 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Incremental codegen on top of the warm `target/` cache below. The Cache size steps report the
-  # registry + target footprint each run, against the 10 GB quota.
-  CARGO_INCREMENTAL: 1
 
 jobs:
   # The Rust pipeline for everything except tauri: fmt · clippy (incl. the bundle feature) · test ·
@@ -30,18 +27,15 @@ jobs:
           sudo apt-get update && sudo apt-get install -y zstd
           df -h /
 
-      # Registry + git + this job's workspace `target/`, warmed on `main` and restored read-only on
-      # PRs. Separate `cargo-test-*` / `cargo-tauri-*` keys (different target dirs) so the test and
-      # tauri jobs never clobber each other's cache.
-      - name: Restore Cargo cache (seeded from main)
-        uses: actions/cache/restore@v5
+      # Cargo cache via the shared first-party action: registry/git + a bounded `target/` (keyed on
+      # Cargo.toml, no whole-target restore→save ratchet) with CARGO_INCREMENTAL defaulted off.
+      # `prefix` keeps the build and tauri jobs in separate cache families.
+      - name: Rust cache
+        uses: gronke/cicd-rust/.github/actions/rust-cache@main
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-test-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: cargo-test-
+          prefix: build
+          cache-target: "true"
+          lockfiles: "**/Cargo.toml"
 
       # Format + lint: the whole workspace with `full`, plus the opt-in `bundle` feature
       # (rolldown), which `full` leaves out.
@@ -109,18 +103,6 @@ jobs:
       - name: Cache size (registry + target)
         if: ${{ !cancelled() }}
         run: du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
-
-      # Seed this job's cache (registry + workspace target) — on `main` only (PRs restored it
-      # read-only above).
-      - name: Save Cargo cache (main only)
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-test-${{ hashFiles('**/Cargo.toml') }}
 
   # Per-example Playwright e2e, one parallel job each, off the prebuilt binaries from `build`. Each
   # suite's playwright.config.ts runs `$E2E_SERVER` (the downloaded binary) instead of `cargo run`.
@@ -206,18 +188,15 @@ jobs:
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             build-essential pkg-config file zstd
 
-      # Registry + git + the tauri crate's own release `target/` (a separate dir from the test job's
-      # workspace target), warmed on `main` and restored read-only here. The free-disk step above
-      # gives the restore headroom.
-      - name: Restore Cargo cache (read-only; seeded from main)
-        uses: actions/cache/restore@v5
+      # Cargo cache via the shared action — the tauri crate's own release `target/` (a separate dir
+      # from the test job's workspace target), bounded and keyed on Cargo.toml; incremental off.
+      - name: Rust cache
+        uses: gronke/cicd-rust/.github/actions/rust-cache@main
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            examples/tauri/src-tauri/target
-          key: cargo-tauri-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: cargo-tauri-
+          prefix: tauri
+          cache-target: "true"
+          target-dir: examples/tauri/src-tauri/target
+          lockfiles: "**/Cargo.toml"
 
       - name: Formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -248,14 +227,3 @@ jobs:
       - name: Cache size (registry + tauri target)
         if: ${{ !cancelled() }}
         run: du -sh ~/.cargo/registry ~/.cargo/git src-tauri/target 2>/dev/null || true
-
-      # Seed the tauri caches (registry + its release target) — on `main` only; PRs restore read-only.
-      - name: Save Cargo cache (tauri · main only)
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            examples/tauri/src-tauri/target
-          key: cargo-tauri-${{ hashFiles('**/Cargo.toml') }}
