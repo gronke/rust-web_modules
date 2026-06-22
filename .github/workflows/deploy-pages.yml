@@ -37,6 +37,7 @@ on:
         type: string
         required: false
         default: ""
+        description: A package.json file, or a directory containing one, whose `dependencies` are also vendored.
       html:
         type: string
         required: false
