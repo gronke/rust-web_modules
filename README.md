@@ -75,13 +75,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: gronke/rust-web_modules@v0
         with:
           packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
           template: web/index.html.tera     # or inline `html:`; omit for a minimal default
           minify: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: site, path: dist }
 ```
 
@@ -94,13 +94,13 @@ jobs:
     permissions: { pages: write, id-token: write }
     environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}" }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: gronke/rust-web_modules@v0
         with:
           packages: "lit@^3 bootstrap@^5"
           template: web/index.html.tera
           mount: /my-repo/web_modules        # project page is served under /<repo>/
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with: { path: dist }
       - id: deploy

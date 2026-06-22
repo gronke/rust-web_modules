@@ -11,10 +11,10 @@
 #       permissions: { pages: write, id-token: write }
 #       environment: { name: github-pages, url: "${{ steps.pages.outputs.page_url }}" }
 #       steps:
-#         - uses: actions/checkout@v6
+#         - uses: actions/checkout@v7
 #         - uses: gronke/rust-web_modules@v0
 #           with: { packages: "lit@^3", mount: /your-repo/web_modules }
-#         - uses: actions/configure-pages@v5
+#         - uses: actions/configure-pages@v6
 #         - uses: actions/upload-pages-artifact@v5
 #           with: { path: dist }
 #         - id: pages

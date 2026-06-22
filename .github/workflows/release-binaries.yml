@@ -25,7 +25,7 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
           - { target: aarch64-apple-darwin, runner: macos-14 }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Build the full lean toolchain (cli + env + compress + icons/dts/i18n/npm/dev; only the heavy
       # `bundle`/rolldown is excluded) in release mode, reproducibly — `--locked` uses the committed

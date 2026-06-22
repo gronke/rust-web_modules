@@ -19,7 +19,7 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The full workspace build (incl. react-esm's rolldown/oxc tree and the opt-in `bundle`
       # feature) needs more than the runner's default free space. Reclaim ~20 GB of preinstalled
@@ -135,7 +135,7 @@ jobs:
     steps:
       # The checkout provides tests/, playwright config + package.json, and — for react-umd, whose
       # binary live-serves from a compile-time path — the `web/` sources at the matching location.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -144,7 +144,7 @@ jobs:
           cache-dependency-path: examples/${{ matrix.example }}/package-lock.json
 
       - name: Download example binaries
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: example-bins
           path: e2e-bins
@@ -188,7 +188,7 @@ jobs:
       run:
         working-directory: examples/tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The tauri release build (webkit2gtk + the workspace deps) needs more than the runner's
       # default free space; reclaim ~20 GB of preinstalled tooling we never use.
