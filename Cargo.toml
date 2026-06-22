@@ -55,6 +55,12 @@ dev = ["axum", "typescript", "scss", "dep:notify", "dep:tower-livereload"]
 # The `web-modules` CLI binary (dev / compile / vendor / ci / npm). `npm-utils/cli` powers the
 # `npm` passthrough; it stays behind this opt-in feature so the library path never pulls clap.
 cli = ["dev", "minify", "dep:clap", "npm-utils/cli"]
+# Opt-in: let the `web-modules build` subcommand read its config from `WEB_MODULES_*` environment
+# variables (clap's `env`). Off by default so a plain `--features cli` install stays minimal — clap's
+# env codegen is only compiled when asked for. `clap?/env` flips the feature on only if clap is
+# already enabled (it is, via `cli`'s `dep:clap`), so `--features env` alone never pulls a bin-less
+# clap. Pair with `cli`; the GitHub Action installs `--features cli,env`.
+env = ["clap?/env"]
 # Re-export `npm-utils` as `web_modules::npm`. `npm-utils` is always compiled (the core `vendor`
 # path needs it); this flag only exposes the public re-export, so consumers can reach the npm API
 # (resolve / install a node_modules tree / npm ci) without taking a separate dependency.
@@ -64,9 +70,10 @@ npm = []
 # toolchain stays a buildless, no-bundler ESM workflow; pull this in only when you need CJS→ESM.
 # Independent of `npm`: pair with `npm` (→ `web_modules::npm`) for the install→bundle pipeline.
 bundle = ["dep:rolldown", "dep:tokio"]
-# Everything in the lean toolchain. The heavy, opt-in `bundle` is intentionally NOT included, so
-# `full` (and `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "npm"]
+# Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
+# env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
+# `--features full`) builds stay free of the rolldown / second-oxc tree.
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`

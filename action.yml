@@ -1,0 +1,155 @@
+# Composite action: build a deployable web_modules dist with `web-modules build` — vendor npm into
+# web_modules/, transform TypeScript, compile SCSS, copy static files, and render index.html with the
+# import map injected. No Node, no bundler. Use it on its own as the "build to a dist directory" half,
+# or via .github/workflows/deploy-pages.yml (the reusable workflow that adds the Pages deploy — a
+# composite action can't set the pages:write / id-token:write permissions or the github-pages
+# environment that deploy needs, so that part has to be a workflow).
+#
+# Lives at the repo root for the clean `uses: gronke/rust-web_modules@v0`. It is NOT packaged into the
+# crate: Cargo.toml's explicit `include = [...]` lists only src / Cargo.toml / README / LICENSE, so
+# this file never ships to crates.io. The caller checks out its own repo first; this action builds
+# from that working directory.
+name: web-modules build
+description: Vendor npm + transform TS + compile SCSS + render index.html (import map injected) into dist/. Pure Rust, no Node.
+branding:
+  icon: package
+  color: purple
+
+inputs:
+  src:
+    description: Source directory (TypeScript, SCSS, HTML and other static files).
+    required: false
+    default: web
+  out:
+    description: Output (dist) directory.
+    required: false
+    default: dist
+  mount:
+    description: >-
+      URL prefix the vendored modules are served at. For a GitHub *project* page served under
+      /<repo>/, pass /<repo>/web_modules (the deploy-pages workflow derives this for you).
+    required: false
+    default: /web_modules
+  packages:
+    description: 'Space-separated package specs to vendor, e.g. "lit@^3 bootstrap@^5". Optional when `manifest` is set.'
+    required: false
+    default: ""
+  manifest:
+    description: A package.json whose `dependencies` are also vendored.
+    required: false
+    default: ""
+  html:
+    description: >-
+      Inline index.html; the literal {importmap} is replaced with the import-map <script>. Keep entry
+      scripts RELATIVE (./app.js) so the page works under a subpath. Leave empty for the built-in
+      default, or set `template` to render a Tera template instead.
+    required: false
+    default: ""
+  template:
+    description: A Tera template file (rendered with an `importmap` variable) used instead of `html`.
+    required: false
+    default: ""
+  minify:
+    description: Minify the emitted JS (true/false).
+    required: false
+    default: "false"
+  gzip:
+    description: Write .gz sidecars next to assets (true/false). This action installs the `compress` feature so it takes effect.
+    required: false
+    default: "false"
+  version:
+    description: >-
+      A crates.io version requirement to install (e.g. 0.3 or 0.3.1). Leave empty (default) to build
+      web_modules from THIS action's own source — always version-exact and always has `build`, whether
+      or not a matching release is on crates.io yet.
+    required: false
+    default: ""
+
+outputs:
+  dist:
+    description: Path to the built dist directory (echoes `out`).
+    value: ${{ inputs.out }}
+
+runs:
+  using: composite
+  steps:
+    # 1. A Rust toolchain (>= the crate MSRV, 1.94). GitHub-hosted runners ship one; bootstrap rustup
+    #    only if cargo is somehow absent, so the action is self-contained on minimal runners too.
+    - name: Ensure a Rust toolchain
+      shell: bash
+      run: |
+        if ! command -v cargo >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        fi
+
+    # 2. Cache key = a content hash of the web_modules source the binary is built from (the action
+    #    checkout's src/ + Cargo.toml) plus any requested crates.io `version`. Same inputs → same
+    #    binary → cache hit; any source or version change re-keys, so the cache is never stale — even
+    #    under a floating `@v0` tag whose underlying commit moves between releases.
+    - name: Compute install cache key
+      id: key
+      shell: bash
+      run: |
+        hash=$(find "$GITHUB_ACTION_PATH/src" "$GITHUB_ACTION_PATH/Cargo.toml" -type f -print0 \
+                 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+        echo "value=web-modules-${{ runner.os }}-${hash}-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+    # The installed binary (self-contained) plus the cargo registry/git (to speed a cache-miss
+    # rebuild). A hit restores web-modules into ~/.cargo/bin and the install step below short-circuits.
+    - name: Cache web-modules binary + cargo registry
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/bin/web-modules
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ steps.key.outputs.value }}
+
+    # 3. Install the `web-modules` CLI unless the cache already restored it. By default build from THIS
+    #    action's own source ($GITHUB_ACTION_PATH is the checked-out action repo — Cargo.toml and all),
+    #    so the `build` subcommand is present regardless of what's on crates.io; a `version` input
+    #    switches to a published crate. `--features cli,env,compress`: `env` for the WEB_MODULES_*
+    #    variables wired below, `compress` so `gzip: true` works. (No `--locked`: no committed lockfile.)
+    - name: Install web-modules
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        if command -v web-modules >/dev/null 2>&1; then
+          echo "web-modules restored from cache: $(web-modules --version)"
+          exit 0
+        fi
+        if [ -n "$INPUT_VERSION" ]; then
+          echo "Installing web_modules $INPUT_VERSION from crates.io"
+          cargo install web_modules --version "$INPUT_VERSION" --features cli,env,compress
+        else
+          echo "Installing web_modules from the action source: $GITHUB_ACTION_PATH"
+          cargo install --path "$GITHUB_ACTION_PATH" --features cli,env,compress
+        fi
+        web-modules --version
+
+    # 4. Build. Config flows in as WEB_MODULES_* environment variables (the opt-in `env` feature reads
+    #    them); the genuinely-optional inputs go on the command line, and only when non-empty — clap
+    #    treats an empty env var as a provided empty value, which would inject a stray spec/path.
+    - name: web-modules build
+      shell: bash
+      env:
+        WEB_MODULES_SRC: ${{ inputs.src }}
+        WEB_MODULES_OUT: ${{ inputs.out }}
+        WEB_MODULES_MOUNT: ${{ inputs.mount }}
+        WEB_MODULES_MINIFY: ${{ inputs.minify }}
+        WEB_MODULES_GZIP: ${{ inputs.gzip }}
+        INPUT_PACKAGES: ${{ inputs.packages }}
+        INPUT_MANIFEST: ${{ inputs.manifest }}
+        INPUT_TEMPLATE: ${{ inputs.template }}
+        INPUT_HTML: ${{ inputs.html }}
+      run: |
+        args=()
+        if [ -n "$INPUT_MANIFEST" ]; then args+=(--manifest "$INPUT_MANIFEST"); fi
+        if [ -n "$INPUT_TEMPLATE" ]; then args+=(--template "$INPUT_TEMPLATE"); fi
+        if [ -n "$INPUT_HTML" ]; then args+=(--html "$INPUT_HTML"); fi
+        pkgs=()
+        if [ -n "$INPUT_PACKAGES" ]; then read -ra pkgs <<< "$INPUT_PACKAGES"; fi
+        web-modules build "${args[@]}" "${pkgs[@]}"
