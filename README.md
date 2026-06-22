@@ -74,7 +74,7 @@ Build a deployable `dist/` - and optionally publish it to GitHub Pages - straigh
 - uses: actions/checkout@v4
 - uses: gronke/rust-web_modules@v0
   with:
-    packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web/package.json
+    packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
     template: web/index.html.tera     # or an inline `html:`; omit for a minimal default
     minify: true
 - run: ls dist                        # ready to upload anywhere

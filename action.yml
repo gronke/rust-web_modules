@@ -35,7 +35,7 @@ inputs:
     required: false
     default: ""
   manifest:
-    description: A package.json whose `dependencies` are also vendored.
+    description: A package.json file - or a directory containing one - whose `dependencies` are also vendored.
     required: false
     default: ""
   html:
@@ -147,7 +147,18 @@ runs:
         INPUT_HTML: ${{ inputs.html }}
       run: |
         args=()
-        if [ -n "$INPUT_MANIFEST" ]; then args+=(--manifest "$INPUT_MANIFEST"); fi
+        # `manifest` accepts a package.json file OR a directory containing one; resolve a directory
+        # to <dir>/package.json (the CLI's --manifest reads a file). Fail with a clear annotation if
+        # the resolved file is missing, rather than the CLI's pathless io error.
+        manifest="$INPUT_MANIFEST"
+        if [ -n "$manifest" ]; then
+          if [ -d "$manifest" ]; then manifest="${manifest%/}/package.json"; fi
+          if [ ! -f "$manifest" ]; then
+            echo "::error::manifest not found: $manifest (pass a package.json file or a directory containing one)"
+            exit 1
+          fi
+          args+=(--manifest "$manifest")
+        fi
         if [ -n "$INPUT_TEMPLATE" ]; then args+=(--template "$INPUT_TEMPLATE"); fi
         if [ -n "$INPUT_HTML" ]; then args+=(--html "$INPUT_HTML"); fi
         pkgs=()
