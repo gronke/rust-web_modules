@@ -54,6 +54,8 @@ jobs:
       # an official first-party tool invoked from a run step, so no third-party action is needed.
       # Matrix jobs run concurrently: the first `gh release create` makes the release, the rest hit
       # "already exists" (ignored); each then uploads its own assets (`--clobber` makes re-runs safe).
+      # The release body is the annotated tag's own message (`--notes-from-tag`), not GitHub's
+      # auto-generated commit/PR list.
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          gh release create "$tag" --title "$tag" --generate-notes --verify-tag \
+          gh release create "$tag" --title "$tag" --notes-from-tag --verify-tag \
             || echo "release $tag already exists; uploading assets"
           gh release upload "$tag" \
             "web-modules-${{ matrix.target }}" \
