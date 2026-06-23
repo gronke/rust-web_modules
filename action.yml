@@ -121,14 +121,14 @@ runs:
           exit 0
         fi
 
-        # Map the runner to a release target triple (native builds only).
+        # Map the runner to a release asset slug (native builds only).
         os=$(uname -s); arch=$(uname -m)
         case "$os" in
-          Linux)  case "$arch" in x86_64|amd64) target=x86_64-unknown-linux-gnu ;; aarch64|arm64) target=aarch64-unknown-linux-gnu ;; *) target="" ;; esac ;;
-          Darwin) case "$arch" in arm64|aarch64) target=aarch64-apple-darwin ;; *) target="" ;; esac ;;
-          *) target="" ;;
+          Linux)  case "$arch" in x86_64|amd64) slug=linux-x86_64 ;; aarch64|arm64) slug=linux-arm64 ;; *) slug="" ;; esac ;;
+          Darwin) case "$arch" in arm64|aarch64) slug=macos-arm64 ;; *) slug="" ;; esac ;;
+          *) slug="" ;;
         esac
-        if [ -z "$target" ]; then
+        if [ -z "$slug" ]; then
           echo "::error::no prebuilt web-modules binary for $os/$arch (built: Linux x86_64/arm64, macOS arm64) — set 'from-source: true'"
           exit 1
         fi
@@ -141,7 +141,7 @@ runs:
           base="https://github.com/$repo/releases/download/$tag"
         fi
 
-        asset="web-modules-$target"
+        asset="web-modules-$slug"
         dir="$HOME/.web-modules/bin"; mkdir -p "$dir"; bin="$dir/web-modules"
         echo "Downloading $base/$asset"
         if ! curl -fsSL "$base/$asset" -o "$bin"; then
