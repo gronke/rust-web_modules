@@ -16,6 +16,8 @@ jobs:
   publish-dry-run:
     name: publish dry-run · MSRV
     runs-on: ubuntu-latest
+    # Skip a bare-major tag push (e.g. a manual `v0`); only real X.Y.Z tags warrant the dry-run.
+    if: ${{ contains(github.ref_name, '.') }}
     steps:
       - uses: actions/checkout@v7
 

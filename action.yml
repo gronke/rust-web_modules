@@ -21,13 +21,15 @@
 #           uses: actions/deploy-pages@v5
 #
 # By default the action DOWNLOADS a prebuilt `web-modules` binary matching the runner's OS/arch
-# (Linux x86_64/arm64, macOS arm64) from the GitHub Releases of gronke/rust-web_modules. On other
-# platforms, or to build a specific source tree, set `from-source: true` (compiles with cargo).
+# (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64) from the GitHub Releases of
+# gronke/rust-web_modules. On other platforms, or to build a specific source tree, set
+# `from-source: true` (compiles with cargo).
 #
 # Lives at the repo root for the clean `uses: gronke/rust-web_modules@v0`; it is NOT packaged into the
 # crate (Cargo.toml's explicit `include` lists only src/Cargo.toml/README/LICENSE). The caller checks
 # out its own repo first; this action builds from that working directory.
 name: web-modules build
+author: Stefan Grönke
 description: Vendor npm + transform TS + compile SCSS + render index.html (import map injected) into dist/. Pure Rust, no Node.
 branding:
   icon: package
@@ -78,7 +80,9 @@ inputs:
   version:
     description: >-
       Which released `web-modules` to download (a version like 0.3 / 0.3.1, a tag like v0.3.1, or
-      `edge`). Empty (default) downloads the latest release. Ignored when `from-source: true`.
+      `edge`). Empty (default): the release matching the action tag you pinned when it is an exact
+      version (`uses: …@v0.3.1` → the v0.3.1 binary, reproducible), otherwise the latest release
+      (e.g. pinning `@v0`, a branch, or a commit SHA). Ignored when `from-source: true`.
     required: false
     default: ""
   from-source:
@@ -103,6 +107,7 @@ runs:
       env:
         INPUT_VERSION: ${{ inputs.version }}
         FROM_SOURCE: ${{ inputs.from-source }}
+        ACTION_REF: ${{ github.action_ref }} # the ref the caller pinned: v0.3.1 / v0 / branch / SHA
       run: |
         set -euo pipefail
         repo="gronke/rust-web_modules"
@@ -121,36 +126,73 @@ runs:
           exit 0
         fi
 
-        # Map the runner to a release asset slug (native builds only).
+        # Map the runner to a release asset slug (native targets only). On Windows, `uname` runs
+        # under the Actions git-bash; its `uname -m` is unreliable under x64 emulation, so read the
+        # true machine arch from Windows' own PROCESSOR_ARCHITE(W6432) variables.
         os=$(uname -s); arch=$(uname -m)
         case "$os" in
           Linux)  case "$arch" in x86_64|amd64) slug=linux-x86_64 ;; aarch64|arm64) slug=linux-arm64 ;; *) slug="" ;; esac ;;
-          Darwin) case "$arch" in arm64|aarch64) slug=macos-arm64 ;; *) slug="" ;; esac ;;
+          Darwin) case "$arch" in arm64|aarch64) slug=macos-arm64 ;; x86_64) slug=macos-x86_64 ;; *) slug="" ;; esac ;;
+          MINGW*|MSYS*|CYGWIN*)
+            winarch="${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-$arch}}"
+            case "$winarch" in
+              ARM64|arm64|aarch64) slug=windows-arm64 ;;
+              AMD64|x86_64|amd64)  slug=windows-x86_64 ;;
+              *) slug="" ;;
+            esac ;;
           *) slug="" ;;
         esac
         if [ -z "$slug" ]; then
-          echo "::error::no prebuilt web-modules binary for $os/$arch (built: Linux x86_64/arm64, macOS arm64) — set 'from-source: true'"
+          echo "::error::no prebuilt web-modules binary for $os/$arch (built: Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64) — set 'from-source: true'"
           exit 1
         fi
+        ext=""; case "$slug" in windows-*) ext=".exe" ;; esac # Windows carries .exe on disk + asset
 
-        # Resolve the release URL base from `version` (empty → latest).
-        if [ -z "$INPUT_VERSION" ]; then
+        # Resolve which release to download. Precedence:
+        #   1. an explicit `version` input (unchanged — includes the `edge` channel);
+        #   2. else, if the caller pinned an EXACT vMAJOR.MINOR.PATCH action ref, match it, so
+        #      `uses: …@v0.3.1` fetches the v0.3.1 binary the action code was shipped with (repro);
+        #   3. else (a moving major like v0, a branch, or a commit SHA) → the latest release. A
+        #      moving `v0` tag has no Release of its own, so it MUST fall through to latest here.
+        ver="$INPUT_VERSION"
+        if [ -z "$ver" ]; then
+          case "$ACTION_REF" in
+            v[0-9]*.[0-9]*.[0-9]*) ver="$ACTION_REF" ;; # v0.3.1, v0.3.1-rc1 → pin
+            *) ver="" ;;                                # v0 / branch / SHA → latest
+          esac
+        fi
+        if [ -z "$ver" ]; then
           base="https://github.com/$repo/releases/latest/download"
         else
-          case "$INPUT_VERSION" in v*|edge) tag="$INPUT_VERSION" ;; *) tag="v$INPUT_VERSION" ;; esac
+          case "$ver" in v*|edge) tag="$ver" ;; *) tag="v$ver" ;; esac
           base="https://github.com/$repo/releases/download/$tag"
         fi
 
-        asset="web-modules-$slug"
-        dir="$HOME/.web-modules/bin"; mkdir -p "$dir"; bin="$dir/web-modules"
-        echo "Downloading $base/$asset"
-        if ! curl -fsSL "$base/$asset" -o "$bin"; then
-          echo "::error::could not download $base/$asset — check the version, or set 'from-source: true'"
+        dir="$HOME/.web-modules/bin"; mkdir -p "$dir"; bin="$dir/web-modules$ext"
+
+        # Assets to try, in order. A native windows-arm64 build is preferred but may be absent (an
+        # older release, or its build failed) — fall back to the x86_64 binary, which Windows runs
+        # under x64 emulation.
+        candidates="$slug"
+        if [ "$slug" = "windows-arm64" ]; then candidates="windows-arm64 windows-x86_64"; fi
+        asset=""
+        for s in $candidates; do
+          a="web-modules-$s$ext"
+          echo "Downloading $base/$a"
+          if curl -fsSL "$base/$a" -o "$bin"; then slug="$s"; asset="$a"; break; fi
+        done
+        if [ -z "$asset" ]; then
+          echo "::error::could not download a web-modules binary from $base (tried: $candidates) — check the version, or set 'from-source: true'"
           exit 1
         fi
-        # Verify the sha256 sidecar (sha256sum on Linux, shasum on macOS).
-        if curl -fsSL "$base/$asset.sha256" -o "$bin.sha256"; then
-          expected=$(awk '{print $1}' "$bin.sha256")
+
+        # Verify against the release's combined SHA256SUMS (sha256sum on Linux/git-bash, shasum on
+        # macOS). Releases that predate SHA256SUMS simply skip verification (best-effort).
+        if curl -fsSL "$base/SHA256SUMS" -o "$dir/SHA256SUMS"; then
+          expected=$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$dir/SHA256SUMS")
+          if [ -z "$expected" ]; then
+            echo "::error::no checksum entry for $asset in SHA256SUMS"; exit 1
+          fi
           if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$bin" | awk '{print $1}'); else actual=$(shasum -a 256 "$bin" | awk '{print $1}'); fi
           if [ "$expected" != "$actual" ]; then
             echo "::error::checksum mismatch for $asset (expected $expected, got $actual)"; exit 1
@@ -178,6 +220,12 @@ runs:
         INPUT_HTML: ${{ inputs.html }}
       run: |
         args=()
+        # Fail clearly on a missing source dir — almost always a forgotten actions/checkout or a
+        # wrong `src` — rather than surfacing a lower-level error from the binary.
+        if [ ! -d "$WEB_MODULES_SRC" ]; then
+          echo "::error::source directory not found: '$WEB_MODULES_SRC' (did the job run actions/checkout first, or is the 'src' input wrong?)"
+          exit 1
+        fi
         manifest="$INPUT_MANIFEST"
         if [ -n "$manifest" ]; then
           if [ -d "$manifest" ]; then manifest="${manifest%/}/package.json"; fi
@@ -192,3 +240,24 @@ runs:
         pkgs=()
         if [ -n "$INPUT_PACKAGES" ]; then read -ra pkgs <<< "$INPUT_PACKAGES"; fi
         web-modules build "${args[@]}" "${pkgs[@]}"
+
+        # Best-effort job summary of what was built (never fail the build over it). find/du/wc are
+        # available on every supported runner, incl. Windows git-bash.
+        {
+          echo "### web-modules build"
+          echo ""
+          echo "| input | value |"
+          echo "| --- | --- |"
+          echo "| src → out | \`$WEB_MODULES_SRC\` → \`$WEB_MODULES_OUT\` |"
+          echo "| mount | \`$WEB_MODULES_MOUNT\` |"
+          [ -n "$INPUT_PACKAGES" ] && echo "| packages | \`$INPUT_PACKAGES\` |"
+          [ -n "$manifest" ] && echo "| manifest | \`$manifest\` |"
+          [ -n "$INPUT_TEMPLATE" ] && echo "| template | \`$INPUT_TEMPLATE\` |"
+          echo "| minify · gzip | \`$WEB_MODULES_MINIFY\` · \`$WEB_MODULES_GZIP\` |"
+          echo ""
+          if [ -d "$WEB_MODULES_OUT" ]; then
+            files=$(find "$WEB_MODULES_OUT" -type f | wc -l | tr -d ' ')
+            size=$(du -sh "$WEB_MODULES_OUT" 2>/dev/null | cut -f1)
+            echo "Built **$files** files into \`$WEB_MODULES_OUT/\` (**$size**)."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY" || true

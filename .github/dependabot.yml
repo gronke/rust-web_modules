@@ -1,0 +1,12 @@
+# Dependabot keeps the GitHub Actions our workflows pin (`uses:`) up to date.
+# It opens one grouped pull request per week for any available bumps.
+# Cargo dependencies are bumped by hand, so they are intentionally not tracked here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

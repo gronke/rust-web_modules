@@ -1,5 +1,10 @@
 # web_modules
 
+[![CI](https://github.com/gronke/rust-web_modules/actions/workflows/ci.yml/badge.svg)](https://github.com/gronke/rust-web_modules/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/web_modules.svg)](https://crates.io/crates/web_modules)
+[![docs.rs](https://img.shields.io/docsrs/web_modules)](https://docs.rs/web_modules)
+[![License: MIT](https://img.shields.io/crates/l/web_modules)](LICENSE)
+
 **Pure-Rust tooling for developing Web Components**: vendor npm packages, transform
 TypeScript/SCSS, and serve or embed a native-ESM frontend, with **no Node, no npm and no
 bundler** at build time. Use it as a **`web-modules` CLI** for everyday development, or as a
@@ -66,7 +71,7 @@ web_modules = "0.3"   # Rust 1.94+
 
 ## GitHub Actions
 
-A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64), or compiles from this action's source with `from-source: true`. The action is **build-only**; compose it with the official actions to publish.
+A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`. Pin `@v0` to track the latest 0.x, or an exact `@v0.3.1` — which fetches the matching binary (reproducible); the `version` input overrides this. The action is **build-only**; compose it with the official actions to publish.
 
 **Build a dist artifact:**
 
