@@ -3,9 +3,9 @@
 #
 # One-time setup: repo Settings → Pages → Source: "GitHub Actions".
 #
-# Uses `from-source: true` because the prebuilt binary (with the `build` subcommand) doesn't exist
-# until the first `v*` tag triggers release-binaries.yml. After that first release, drop
-# `from-source` (and the cargo cache step) so this downloads the binary instead of compiling.
+# Builds via the action's default path — downloading the prebuilt `web-modules` binary — so this
+# also proves that download path end-to-end. On `main`, `uses: ./` resolves the binary to the
+# latest published release.
 name: pages
 
 on:
@@ -30,29 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Cache cargo so the from-source `full` build of web-modules isn't recompiled when the crate
-      # source + lock are unchanged. Remove this once the action downloads the prebuilt binary.
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/web-modules
-            ~/.cargo/.crates2.json
-            ~/.cargo/.crates.toml
-          key: web-modules-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'src/**/*.rs') }}
-          restore-keys: web-modules-${{ runner.os }}-
-
       # A project page is served at https://<owner>.github.io/<repo>/, so root the import map there.
       - name: Resolve mount
         id: mount
         run: echo "value=/${{ github.event.repository.name }}/web_modules" >> "$GITHUB_OUTPUT"
 
-      # Build examples/gh-pages → dist/ with the root composite action (built from source for now).
+      # Build examples/gh-pages → dist/ with the root composite action, downloading the prebuilt
+      # web-modules binary — the default path most consumers use.
       - name: Build the demo
         uses: ./
         with:
-          from-source: "true"
           src: examples/gh-pages
           manifest: examples/gh-pages
           template: examples/gh-pages/index.html.tera

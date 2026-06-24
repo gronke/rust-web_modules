@@ -227,3 +227,19 @@ jobs:
       - name: Cache size (registry + tauri target)
         if: ${{ !cancelled() }}
         run: du -sh ~/.cargo/registry ~/.cargo/git src-tauri/target 2>/dev/null || true
+
+  # Lint the workflow files with the official actionlint image (which bundles shellcheck for the
+  # `run:` blocks). actionlint targets *workflows*; the composite `action.yml` is a different schema
+  # it can't parse, so that file's embedded bash is reviewed by hand instead. Tracks `:latest`
+  # deliberately (no upgrade churn) — safe here since the container has no network, runs non-root,
+  # and mounts the repo read-only.
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: |
+          docker run --rm --network=none --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --volume "$PWD:/repo:ro" --workdir /repo \
+            rhysd/actionlint:latest -color
