@@ -1,7 +1,7 @@
 name: release readiness
 
 # Runs when a signed release tag (v*) is pushed — just before a `cargo publish`. Confirms the
-# crate packages + publishes cleanly (dry-run, no upload) and reports the real MSRV. Kept out of
+# crate packages + publishes cleanly (dry-run, no upload) and verifies the declared MSRV. Kept out of
 # the per-PR CI: the verify build is heavy (it is what used to exhaust the runner's disk there)
 # and only matters at release time. Isolated runner → no shared cache, no zstd needed.
 on:
@@ -21,11 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: MSRV check (informational — reports the real minimum)
-        continue-on-error: true
+      - name: MSRV check (verifies the declared rust-version, 1.94)
         run: |
-          rustup toolchain install 1.82 --profile minimal
-          cargo +1.82 check -p web_modules --features full
+          rustup toolchain install 1.94 --profile minimal
+          cargo +1.94 check -p web_modules --features full
 
       - name: Package contents
         run: cargo package -p web_modules --list
