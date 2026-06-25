@@ -78,11 +78,12 @@ fn lit_element_bake_emits_components_and_inlines_importmap() {
 
     build(&BuildOptions {
         specs: &specs,
-        src: &web,
+        roots: std::slice::from_ref(&web),
         out: &out,
         mount: "/web_modules",
         html: "<!doctype html><html><head>{importmap}<script type=\"module\" src=\"/app.js\"></script></head><body><counter-card></counter-card></body></html>",
         template: None,
+        processors: Default::default(),
         output: Default::default(),
     })
     .unwrap();
@@ -125,21 +126,23 @@ fn embedded_bake_minifies_and_gzips() {
 
     build(&BuildOptions {
         specs: &[],
-        src: &web,
+        roots: std::slice::from_ref(&web),
         out: &plain,
         mount: "/web_modules",
         html,
         template: None,
+        processors: Default::default(),
         output: Output::default(), // both off
     })
     .unwrap();
     build(&BuildOptions {
         specs: &[],
-        src: &web,
+        roots: std::slice::from_ref(&web),
         out: &optimized,
         mount: "/web_modules",
         html,
         template: None,
+        processors: Default::default(),
         output: Output::optimized(), // minify + gzip
     })
     .unwrap();

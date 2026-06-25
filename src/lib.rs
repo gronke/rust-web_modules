@@ -61,6 +61,12 @@ pub use processors::scss;
 #[cfg(feature = "typescript")]
 pub use processors::typescript;
 
+/// CLI scaffolding (the `feature_args!` macro + the `NoConfig` placeholder) that lets
+/// each compiler processor carry its own clap config. Compiled only with `cli`, so the
+/// library path stays clap-free.
+#[cfg(feature = "cli")]
+pub mod cli_config;
+
 // Build-time toolchain, grouped under `build/`: the `build` pipeline plus the emit
 // helpers `bundle` / `compress` / `templates`, each re-exported at its historical crate
 // root path. The `build` module exists whenever any of its members' features is enabled.

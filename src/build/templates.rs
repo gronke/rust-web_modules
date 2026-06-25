@@ -34,6 +34,18 @@ pub fn render_file(path: &Path, context: &Context) -> Result<String> {
     render_str(&template, context)
 }
 
+// Tera has no flags of its own beyond the on/off toggle, so it uses the `NoConfig`
+// placeholder. (`--tera` / `--no-tera`.)
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    TeraArgs,
+    tera,
+    "tera",
+    no_tera,
+    "no-tera",
+    crate::cli_config::NoConfig
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

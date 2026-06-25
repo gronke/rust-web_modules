@@ -16,6 +16,7 @@ use web_modules::vendor::{specs_from_package_json, PackageSpec};
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
+    let web = manifest.join("web");
 
     // Browser deps come from web/package.json `dependencies` (import-map entries
     // auto-derived from each package.json); `devDependencies` there are not vended.
@@ -36,13 +37,15 @@ fn main() {
 
     build(&BuildOptions {
         specs: &specs,
-        src: &manifest.join("web"),
+        roots: std::slice::from_ref(&web),
         out: &out,
         mount: "/web_modules",
-        // Render the page from a Tera template; `{{ importmap | safe }}` becomes the
-        // generated <script type="importmap">. (`html` is unused when `template` is set.)
+        // `web/index.html.tera` is rendered by the tree (with `{{ importmap | safe }}`
+        // becoming the generated <script type="importmap">); `html`/`template` here are
+        // only fallbacks for when the tree has no `index.html`.
         html: "",
-        template: Some(&manifest.join("web/index.html.tera")),
+        template: None,
+        processors: Default::default(),
         output: Default::default(),
     })
     .expect("build lit-element frontend");

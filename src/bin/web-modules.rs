@@ -1,14 +1,19 @@
-//! `web-modules` CLI: `dev` (dev server), `compile` (compile root(s) to an output dir), `build`
-//! (the full vendor→transform→render pipeline into a deployable `dist/`), `vendor` (vendor npm
-//! into `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm` (delegates to
-//! npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature; the opt-in `env` feature
+//! `web-modules` CLI: `dev` (dev server), `build` (compile source root(s) into a deployable output
+//! tree — the static counterpart of `dev`, vendoring npm only when packages are given), `vendor`
+//! (vendor npm into `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm` (delegates
+//! to npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature; the opt-in `env` feature
 //! adds `WEB_MODULES_*` environment-variable config to `build`.
+//!
+//! Each compiler processor (typescript, scss, tera, minify, gzip) contributes its own `--<name>` /
+//! `--no-<name>` toggle — and any `--<name>-…` flags — to `build` and `dev` (assembled via
+//! [`CompilerConfig`]); a global `--no-default-features` turns the default-on set (typescript,
+//! scss, tera) off so they can be re-enabled individually.
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
@@ -32,57 +37,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Dev server: compile TS/SCSS on the fly, watch the tree, live-reload.
+    /// Dev server: compile TS/SCSS on the fly, render `*.tera`, watch the tree, live-reload.
     Dev {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
         /// Address to bind.
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: SocketAddr,
+        #[command(flatten)]
+        compiler: CompilerConfig,
     },
-    /// Compile source root(s) into an output tree (TS→JS, SCSS→CSS, static files copied).
+    /// Build a deployable output tree — the static counterpart of `dev`.
     ///
-    /// Multiple roots are merged (first root wins on a path conflict), exactly as `dev`
-    /// serves them. Emits a directory tree, not a bundle; for the full
-    /// vendor+transform+render embed pipeline use the `web_modules::build` helper.
-    Compile {
-        /// Source root(s), merged (first match wins). Defaults to the current dir. With `--out`
-        /// omitted, the *last* path is taken as the output directory.
-        roots: Vec<PathBuf>,
-        /// Output directory (clearer than a trailing positional, and the unambiguous form when
-        /// passing more than one root).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Also compile SCSS.
-        #[arg(long)]
-        scss: bool,
-        /// Minify emitted `.js`.
-        #[arg(long)]
-        minify: bool,
-    },
-    /// Build a complete, deployable `dist/` - the full vendor→transform→render pipeline.
-    ///
-    /// Vendor npm into `web_modules/`, transform TS, compile SCSS, copy static files, vendor the
-    /// transform runtime, and render `index.html` with the import map injected - the CLI surface of
-    /// `web_modules::build::build()`. Packages come from positional `name@range` specs and/or the
-    /// `dependencies` of `--manifest` package.json(s), exactly like `vendor`. The page renders from
-    /// inline `--html` (its literal `{importmap}` is replaced) or, with `--template`, a Tera template
-    /// (rendered with an `importmap` variable). With the opt-in `env` feature each flag also reads a
-    /// `WEB_MODULES_*` environment variable; an explicit flag wins over the variable.
+    /// Compiles the source root(s) — TS→JS, SCSS→CSS, `*.tera`→rendered target, static files
+    /// copied — into `--out`, exactly as `dev` serves them, and renders `index.html` with the
+    /// import map injected. Vendoring is **optional**: pass `--package name@range` and/or
+    /// `--manifest package.json` to vendor npm into `web_modules/`; with neither, a non-vendored
+    /// tree just compiles statically. With the opt-in `env` feature each flag also reads a
+    /// `WEB_MODULES_*` environment variable; an explicit flag wins.
     Build {
-        /// Source directory: TypeScript, SCSS, HTML and other static files.
-        #[cfg_attr(
-            feature = "env",
-            arg(long, env = "WEB_MODULES_SRC", default_value = "web")
-        )]
-        #[cfg_attr(not(feature = "env"), arg(long, default_value = "web"))]
-        src: PathBuf,
-        /// Output (`dist/`) directory.
-        #[cfg_attr(
-            feature = "env",
-            arg(long, env = "WEB_MODULES_OUT", default_value = "dist")
-        )]
-        #[cfg_attr(not(feature = "env"), arg(long, default_value = "dist"))]
+        /// Source root(s), merged (first match wins). Defaults to the cwd.
+        roots: Vec<PathBuf>,
+        /// Output directory (required).
+        #[arg(long)]
         out: PathBuf,
         /// URL prefix the vendored modules are served at. Under a GitHub *project* page (served at
         /// `/<repo>/`) pass `/<repo>/web_modules`.
@@ -92,36 +69,36 @@ enum Command {
         )]
         #[cfg_attr(not(feature = "env"), arg(long, default_value = "/web_modules"))]
         mount: String,
-        /// Inline `index.html`; `{importmap}` is replaced with the import-map `<script>`. Keep
-        /// entry scripts RELATIVE (`./app.js`) so the page works under a subpath. Ignored when
-        /// `--template` is given.
+        /// Fallback inline `index.html` (used only when the tree has no `index.html`); `{importmap}`
+        /// is replaced with the import-map `<script>`. Keep entry scripts RELATIVE (`./app.js`).
+        /// Ignored when `--template` is given.
         #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_HTML", default_value_t = DEFAULT_HTML.to_owned()))]
         #[cfg_attr(not(feature = "env"), arg(long, default_value_t = DEFAULT_HTML.to_owned()))]
         html: String,
-        /// Tera template file, rendered with an `importmap` variable, instead of `--html`.
+        /// Fallback Tera template file for `index.html`, rendered with an `importmap` variable,
+        /// instead of `--html` (same fallback rule: used only when the tree has no `index.html`).
         #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_TEMPLATE"))]
         #[cfg_attr(not(feature = "env"), arg(long))]
         template: Option<PathBuf>,
-        /// Minify the emitted `.js`.
-        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_MINIFY", default_value = "false",
-            num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = parse_bool))]
-        #[cfg_attr(not(feature = "env"), arg(long))]
-        minify: bool,
-        /// Write `<file>.gz` sidecars (requires the `compress` feature; ignored without it).
-        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_GZIP", default_value = "false",
-            num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = parse_bool))]
-        #[cfg_attr(not(feature = "env"), arg(long))]
-        gzip: bool,
         /// Also vendor the `dependencies` of this `package.json` (repeatable).
         #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_MANIFEST"))]
         #[cfg_attr(not(feature = "env"), arg(long))]
         manifest: Vec<PathBuf>,
-        /// Packages as `name` or `name@range` (e.g. `lit@^3`). Optional when `--manifest` is given.
+        /// Package to vendor, as `name` or `name@range` (e.g. `lit@^3`); repeatable. Optional —
+        /// omit (with no `--manifest`) for a non-vendored, static-only build.
         #[cfg_attr(
             feature = "env",
-            arg(env = "WEB_MODULES_PACKAGES", value_delimiter = ' ')
+            arg(
+                long = "package",
+                value_name = "SPEC",
+                env = "WEB_MODULES_PACKAGES",
+                value_delimiter = ' '
+            )
         )]
+        #[cfg_attr(not(feature = "env"), arg(long = "package", value_name = "SPEC"))]
         packages: Vec<String>,
+        #[command(flatten)]
+        compiler: CompilerConfig,
     },
     /// Vendor npm packages into web_modules/ + an import map.
     ///
@@ -164,23 +141,96 @@ enum Command {
     },
 }
 
-/// Resolve `compile`'s `[roots…]` + optional `--out` into `(source roots, output dir)`.
-/// `--out` wins; otherwise the last positional path is the output. Remaining paths are the
-/// source roots, defaulting to the current dir. Errors when no output can be determined.
-fn resolve_compile_io(
-    mut roots: Vec<PathBuf>,
-    out: Option<PathBuf>,
-) -> Res<(Vec<PathBuf>, PathBuf)> {
-    let out = match out {
-        Some(out) => out,
-        None => roots
-            .pop()
-            .ok_or("compile: give an output directory - a trailing path or `--out <dir>`")?,
-    };
+/// The compiler processors' assembled CLI surface, flattened into `build` and `dev` so the two
+/// share one input profile. Each processor contributes its own `--<name>` / `--no-<name>` toggle
+/// (plus any `--<name>-…` flags); `--no-default-features` turns the default-on set off.
+///
+/// The binary requires the `cli` feature, which forces `typescript`, `scss`, `minify` and `tera`
+/// on, so those are unconditional here; only `gzip` (the `compress` feature) is optional.
+#[derive(Args, Debug)]
+struct CompilerConfig {
+    /// Disable every default-on compiler feature (typescript, scss, tera); re-enable individually
+    /// with `--typescript` / `--scss` / `--tera`.
+    #[arg(long)]
+    no_default_features: bool,
+    #[command(flatten)]
+    typescript: web_modules::typescript::TypescriptArgs,
+    #[command(flatten)]
+    scss: web_modules::scss::ScssArgs,
+    #[command(flatten)]
+    tera: web_modules::templates::TeraArgs,
+    #[command(flatten)]
+    minify: web_modules::minify::MinifyArgs,
+    #[cfg(feature = "compress")]
+    #[command(flatten)]
+    gzip: web_modules::compress::GzipArgs,
+}
+
+/// The resolved toggles + tuning, independent of which features were compiled in — what `build`
+/// and `dev` actually consume.
+struct ResolvedCompiler {
+    typescript: bool,
+    scss: bool,
+    tera: bool,
+    minify: bool,
+    gzip: bool,
+    ts_decorators: web_modules::typescript::Decorators,
+    extra_scss_load_paths: Vec<PathBuf>,
+}
+
+impl CompilerConfig {
+    /// Fold each processor's toggle against its compiled-in default and `--no-default-features`
+    /// (typescript/scss/tera default on; minify/gzip default off).
+    fn resolve(&self) -> ResolvedCompiler {
+        let nd = self.no_default_features;
+        ResolvedCompiler {
+            typescript: self.typescript.enabled(true, nd),
+            scss: self.scss.enabled(true, nd),
+            tera: self.tera.enabled(true, nd),
+            minify: self.minify.enabled(false, nd),
+            #[cfg(feature = "compress")]
+            gzip: self.gzip.enabled(false, nd),
+            #[cfg(not(feature = "compress"))]
+            gzip: false,
+            ts_decorators: self.typescript.config.decorators.into(),
+            extra_scss_load_paths: self.scss.config.load_paths.clone(),
+        }
+    }
+}
+
+impl ResolvedCompiler {
+    /// Map to the build pipeline's [`Processors`](web_modules::build::Processors). `#[non_exhaustive]`,
+    /// so built from `default()` and assigned (minify/gzip live in `Output`, not here).
+    fn into_processors(self) -> web_modules::build::Processors {
+        let mut p = web_modules::build::Processors::default();
+        p.typescript = self.typescript;
+        p.scss = self.scss;
+        p.tera = self.tera;
+        p.ts_decorators = self.ts_decorators;
+        p.extra_scss_load_paths = self.extra_scss_load_paths;
+        p
+    }
+
+    /// Map to the dev server's [`DevConfig`](web_modules::dev::DevConfig) (no minify/gzip — those
+    /// are build *output* options).
+    fn into_dev_config(self) -> web_modules::dev::DevConfig {
+        let mut c = web_modules::dev::DevConfig::default();
+        c.typescript = self.typescript;
+        c.scss = self.scss;
+        c.tera = self.tera;
+        c.ts_decorators = self.ts_decorators;
+        c.extra_scss_load_paths = self.extra_scss_load_paths;
+        c
+    }
+}
+
+/// Default `roots` to the current dir when none were given (matching the dev server and the old
+/// `compile` command).
+fn roots_or_cwd(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     if roots.is_empty() {
         roots.push(PathBuf::from("."));
     }
-    Ok((roots, out))
+    roots
 }
 
 /// Parse one positional vendor spec: `name`, `name@range`, or `@scope/name@range`; the range
@@ -192,25 +242,14 @@ fn parse_spec(p: &str) -> PackageSpec {
     }
 }
 
-/// Permissive boolean parser for the `env`-driven `--minify`/`--gzip` flags. A plain `bool` arg is
-/// presence-only (`SetTrue`), so `WEB_MODULES_MINIFY=false` would *enable* it; routing the value
-/// through here instead honours an explicit `false`. Accepts the GitHub Actions booleans
-/// (`true`/`false`) plus the usual `1/0`, `yes/no`, `on/off`, case-insensitively.
-#[cfg(feature = "env")]
-fn parse_bool(s: &str) -> Result<bool, String> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(format!(
-            "expected a boolean (true/false, 1/0, yes/no, on/off), got {other:?}"
-        )),
-    }
-}
-
-/// Build vendor's spec set from positional `name@range` specs plus each `--manifest`
-/// package.json's `dependencies`. A positional spec wins over a same-named manifest entry.
-/// Errors when neither source yields a package.
-fn build_vendor_specs(packages: &[String], manifests: &[PathBuf]) -> Res<Vec<PackageSpec>> {
+/// Build vendor's spec set from positional/`--package` specs plus each `--manifest` package.json's
+/// `dependencies`. A positional spec wins over a same-named manifest entry. `vendor` requires a
+/// non-empty result (`require_nonempty = true`); `build` allows none (a non-vendored, static build).
+fn build_vendor_specs(
+    packages: &[String],
+    manifests: &[PathBuf],
+    require_nonempty: bool,
+) -> Res<Vec<PackageSpec>> {
     let mut specs: Vec<PackageSpec> = packages
         .iter()
         .map(String::as_str)
@@ -220,7 +259,7 @@ fn build_vendor_specs(packages: &[String], manifests: &[PathBuf]) -> Res<Vec<Pac
     for path in manifests {
         specs.extend(web_modules::vendor::specs_from_package_json(path)?);
     }
-    if specs.is_empty() {
+    if require_nonempty && specs.is_empty() {
         return Err("vendor: give package specs (e.g. lit@^3) or --manifest <package.json>".into());
     }
     // A positional spec wins over a same-named manifest entry (dedupe, keeping the first).
@@ -232,84 +271,45 @@ fn build_vendor_specs(packages: &[String], manifests: &[PathBuf]) -> Res<Vec<Pac
 #[tokio::main]
 async fn main() -> Res {
     match Cli::parse().command {
-        Command::Dev { mut roots, addr } => {
-            if roots.is_empty() {
-                roots.push(PathBuf::from("."));
-            }
-            web_modules::dev::serve(roots, addr).await?;
-        }
-        Command::Compile {
+        Command::Dev {
             roots,
-            out,
-            scss,
-            minify,
+            addr,
+            compiler,
         } => {
-            let (roots, out) = resolve_compile_io(roots, out)?;
-            // SCSS `@use`/`@import` load paths span every root, matching the dev server.
-            let load_paths: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-            let (mut modules, mut stylesheets, mut copied) = (0, 0, 0);
-            // Compile last-to-first so the first root's files win on a path conflict (the order
-            // `dev` resolves overlapping roots in).
-            for root in roots.iter().rev() {
-                modules += web_modules::typescript::compile_directory(root, &out)?;
-                if scss {
-                    stylesheets += web_modules::scss::compile_directory(root, &out, &load_paths)?;
-                }
-                // Carry across everything the processors don't transform (HTML, images, JSON, …)
-                // so the output is a complete, servable tree — not just the compiled modules.
-                copied += web_modules::static_files::copy_static(root, &out)?;
-            }
-            if minify {
-                web_modules::minify::minify_directory(&out)?;
-            }
-            println!(
-                "compiled {modules} module(s){} + copied {copied} static file(s) from {} root(s) → {}{}",
-                if scss {
-                    format!(", {stylesheets} stylesheet(s)")
-                } else {
-                    String::new()
-                },
-                roots.len(),
-                out.display(),
-                if minify { " (minified)" } else { "" },
-            );
+            let config = compiler.resolve().into_dev_config();
+            web_modules::dev::serve_with(roots_or_cwd(roots), addr, config).await?;
         }
         Command::Build {
-            src,
+            roots,
             out,
             mount,
             html,
             template,
-            minify,
-            gzip,
             manifest,
             packages,
+            compiler,
         } => {
-            // Same spec assembly as `vendor`: positional specs plus each `--manifest`'s
-            // dependencies, with a positional winning over a same-named manifest entry.
-            let specs = build_vendor_specs(&packages, &manifest)?;
-            // `--gzip` only does anything with the `compress` feature compiled in; be loud rather
-            // than silently dropping it.
-            #[cfg(not(feature = "compress"))]
-            if gzip {
-                eprintln!(
-                    "web-modules: --gzip ignored - built without the `compress` feature \
-                     (reinstall with `--features cli,compress`)"
-                );
-            }
-            // The full pipeline (vendor + transform + render), shared with consumer build scripts.
+            // `build` vendors only when given packages/manifest; otherwise it compiles a
+            // non-vendored tree statically (empty spec set, no error).
+            let specs = build_vendor_specs(&packages, &manifest, false)?;
+            let resolved = compiler.resolve();
+            let (minify, gzip) = (resolved.minify, resolved.gzip);
+            let output = web_modules::build::Output::new(minify, gzip);
+            let processors = resolved.into_processors();
+            let roots = roots_or_cwd(roots);
             web_modules::build::build(&web_modules::build::BuildOptions {
                 specs: &specs,
-                src: &src,
+                roots: &roots,
                 out: &out,
                 mount: &mount,
                 html: &html,
                 template: template.as_deref(),
-                // `Output` is `#[non_exhaustive]`, so build it via the constructor, not a literal.
-                output: web_modules::build::Output::new(minify, gzip),
+                processors,
+                output,
             })?;
             println!(
-                "built dist → {} ({} package spec(s), mount {mount}{}{})",
+                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{})",
+                roots.len(),
                 out.display(),
                 specs.len(),
                 if minify { ", minified" } else { "" },
@@ -323,7 +323,7 @@ async fn main() -> Res {
             manifest,
             packages,
         } => {
-            let specs = build_vendor_specs(&packages, &manifest)?;
+            let specs = build_vendor_specs(&packages, &manifest, true)?;
             let map = vendor(&out, &mount, &specs)?;
             match importmap {
                 Some(path) => {
@@ -362,46 +362,13 @@ mod tests {
         specs.iter().map(PackageSpec::name).collect()
     }
 
-    #[test]
-    fn compile_io_two_paths_last_is_output() {
-        let (roots, out) = resolve_compile_io(vec!["web".into(), "dist".into()], None).unwrap();
-        assert_eq!(roots, [PathBuf::from("web")]);
-        assert_eq!(out, PathBuf::from("dist"));
-    }
-
-    #[test]
-    fn compile_io_many_roots_last_is_output() {
-        let (roots, out) =
-            resolve_compile_io(vec!["a".into(), "b".into(), "dist".into()], None).unwrap();
-        assert_eq!(roots, [PathBuf::from("a"), PathBuf::from("b")]);
-        assert_eq!(out, PathBuf::from("dist"));
-    }
-
-    #[test]
-    fn compile_io_single_path_defaults_source_to_cwd() {
-        let (roots, out) = resolve_compile_io(vec!["dist".into()], None).unwrap();
-        assert_eq!(roots, [PathBuf::from(".")]);
-        assert_eq!(out, PathBuf::from("dist"));
-    }
-
-    #[test]
-    fn compile_io_out_flag_keeps_all_positionals_as_roots() {
-        let (roots, out) =
-            resolve_compile_io(vec!["a".into(), "b".into()], Some("dist".into())).unwrap();
-        assert_eq!(roots, [PathBuf::from("a"), PathBuf::from("b")]);
-        assert_eq!(out, PathBuf::from("dist"));
-    }
-
-    #[test]
-    fn compile_io_out_flag_without_roots_defaults_to_cwd() {
-        let (roots, out) = resolve_compile_io(vec![], Some("dist".into())).unwrap();
-        assert_eq!(roots, [PathBuf::from(".")]);
-        assert_eq!(out, PathBuf::from("dist"));
-    }
-
-    #[test]
-    fn compile_io_no_output_is_an_error() {
-        assert!(resolve_compile_io(vec![], None).is_err());
+    /// Parse a `build` invocation (with a dummy `--out`) and resolve its compiler config.
+    fn resolve_build(extra: &[&str]) -> ResolvedCompiler {
+        let argv: Vec<&str> = [&["web-modules", "build", "--out", "out"][..], extra].concat();
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Build { compiler, .. } => compiler.resolve(),
+            _ => panic!("expected Build"),
+        }
     }
 
     #[test]
@@ -413,13 +380,16 @@ mod tests {
     }
 
     #[test]
-    fn vendor_specs_requires_a_source() {
-        assert!(build_vendor_specs(&[], &[]).is_err());
+    fn vendor_specs_requires_a_source_when_asked() {
+        // `vendor` requires a source; `build` (require_nonempty = false) allows none.
+        assert!(build_vendor_specs(&[], &[], true).is_err());
+        assert!(build_vendor_specs(&[], &[], false).unwrap().is_empty());
     }
 
     #[test]
     fn vendor_specs_from_positional_specs() {
-        let specs = build_vendor_specs(&["lit@^3".into(), "@lit/context@^1".into()], &[]).unwrap();
+        let specs =
+            build_vendor_specs(&["lit@^3".into(), "@lit/context@^1".into()], &[], true).unwrap();
         assert_eq!(names(&specs), ["lit", "@lit/context"]);
     }
 
@@ -428,7 +398,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("package.json");
         std::fs::write(&manifest, r#"{"dependencies":{"ms":"^2.1.3"}}"#).unwrap();
-        let specs = build_vendor_specs(&[], std::slice::from_ref(&manifest)).unwrap();
+        let specs = build_vendor_specs(&[], std::slice::from_ref(&manifest), true).unwrap();
         assert_eq!(names(&specs), ["ms"]);
     }
 
@@ -438,93 +408,103 @@ mod tests {
         let manifest = dir.path().join("package.json");
         std::fs::write(&manifest, r#"{"dependencies":{"lit":"^2","ms":"^2"}}"#).unwrap();
         let specs =
-            build_vendor_specs(&["lit@^3".into()], std::slice::from_ref(&manifest)).unwrap();
+            build_vendor_specs(&["lit@^3".into()], std::slice::from_ref(&manifest), true).unwrap();
         // lit (positional, first) then ms (manifest); the manifest's lit is deduped out.
         assert_eq!(names(&specs), ["lit", "ms"]);
     }
 
     #[test]
-    fn build_parses_positional_specs_and_flags() {
+    fn build_requires_out() {
+        assert!(
+            Cli::try_parse_from(["web-modules", "build", "web"]).is_err(),
+            "--out is required"
+        );
+    }
+
+    #[test]
+    fn build_defaults_roots_to_cwd() {
+        let cli = Cli::try_parse_from(["web-modules", "build", "--out", "dist"]).unwrap();
+        match cli.command {
+            Command::Build { roots, .. } => {
+                assert!(roots.is_empty(), "no positional roots given");
+                assert_eq!(roots_or_cwd(roots), [PathBuf::from(".")]);
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_parses_positional_roots_and_packages() {
         let cli = Cli::try_parse_from([
             "web-modules",
             "build",
-            "lit@^3",
-            "@lit/context@^1",
-            "--src",
             "web",
+            "shared",
             "--out",
             "dist",
             "--mount",
             "/repo/web_modules",
+            "--package",
+            "lit@^3",
+            "--package",
+            "@lit/context@^1",
             "--minify",
         ])
         .unwrap();
         match cli.command {
             Command::Build {
-                src,
+                roots,
                 out,
                 mount,
-                minify,
                 packages,
+                compiler,
                 ..
             } => {
-                assert_eq!(src, PathBuf::from("web"));
+                assert_eq!(roots, [PathBuf::from("web"), PathBuf::from("shared")]);
                 assert_eq!(out, PathBuf::from("dist"));
                 assert_eq!(mount, "/repo/web_modules");
-                assert!(minify);
                 assert_eq!(packages, ["lit@^3", "@lit/context@^1"]);
+                assert!(compiler.resolve().minify, "--minify opts in");
             }
             _ => panic!("expected Build"),
         }
     }
 
     #[test]
-    fn build_defaults_are_web_dist_and_flags_off() {
-        let cli = Cli::try_parse_from(["web-modules", "build", "lit@^3"]).unwrap();
-        match cli.command {
-            Command::Build {
-                src,
-                out,
-                mount,
-                minify,
-                gzip,
-                ..
-            } => {
-                assert_eq!(src, PathBuf::from("web"));
-                assert_eq!(out, PathBuf::from("dist"));
-                assert_eq!(mount, "/web_modules");
-                assert!(!minify && !gzip, "minify/gzip default off");
-            }
-            _ => panic!("expected Build"),
-        }
+    fn toggles_default_on_set_and_opt_in() {
+        let d = resolve_build(&[]);
+        assert!(d.typescript && d.scss && d.tera, "ts/scss/tera default on");
+        assert!(!d.minify && !d.gzip, "minify/gzip default off");
+        assert!(resolve_build(&["--minify"]).minify, "--minify opts in");
     }
 
-    #[cfg(feature = "env")]
     #[test]
-    fn parse_bool_accepts_common_forms() {
-        for t in ["1", "true", "TRUE", "Yes", "on"] {
-            assert_eq!(parse_bool(t), Ok(true), "{t:?} should be true");
-        }
-        for f in ["0", "false", "FALSE", "No", "off"] {
-            assert_eq!(parse_bool(f), Ok(false), "{f:?} should be false");
-        }
-        assert!(parse_bool("maybe").is_err());
+    fn toggles_no_scss_disables_regardless_of_order() {
+        assert!(!resolve_build(&["--no-scss"]).scss);
+        // `--no-<name>` wins over `--<name>`, in either order.
+        assert!(!resolve_build(&["--no-scss", "--scss"]).scss);
+        assert!(!resolve_build(&["--scss", "--no-scss"]).scss);
     }
 
-    #[cfg(feature = "env")]
     #[test]
-    fn build_minify_env_false_is_honored() {
-        // The bool-via-env gotcha: a presence-only `SetTrue` flag would read the var's mere
-        // existence as `true`. The parsed-value form must honour the *value*. No `--minify` on the
-        // argv, so the env var is the only source. (No other test writes this var, so no race.)
-        std::env::set_var("WEB_MODULES_MINIFY", "false");
-        let parsed = Cli::try_parse_from(["web-modules", "build", "lit@^3"]);
-        std::env::remove_var("WEB_MODULES_MINIFY");
-        match parsed.unwrap().command {
-            Command::Build { minify, .. } => {
-                assert!(!minify, "WEB_MODULES_MINIFY=false must stay false")
-            }
-            _ => panic!("expected Build"),
-        }
+    fn no_default_features_disables_then_reenables() {
+        let nd = resolve_build(&["--no-default-features"]);
+        assert!(
+            !nd.typescript && !nd.scss && !nd.tera,
+            "--no-default-features turns the default-on set off"
+        );
+        let one = resolve_build(&["--no-default-features", "--scss"]);
+        assert!(one.scss, "--scss re-enables after --no-default-features");
+        assert!(!one.typescript && !one.tera, "the others stay off");
+    }
+
+    #[test]
+    fn typescript_decorators_default_lit() {
+        use web_modules::typescript::Decorators;
+        assert_eq!(resolve_build(&[]).ts_decorators, Decorators::Lit);
+        assert_eq!(
+            resolve_build(&["--typescript-decorators", "standard"]).ts_decorators,
+            Decorators::Standard
+        );
     }
 }

@@ -202,30 +202,30 @@ runs:
         echo "$dir" >> "$GITHUB_PATH"
         "$bin" --version
 
-    # 2. Build. Config flows in as WEB_MODULES_* environment variables (the `env` feature reads them);
-    #    genuinely-optional inputs go on the command line, and only when non-empty — clap treats an
-    #    empty env var as a provided empty value, which would inject a stray spec/path. `manifest`
-    #    accepts a package.json file OR a directory containing one (resolved here).
+    # 2. Build. The source dir is passed as a positional root and `--out` explicitly; the other
+    #    inputs go on the command line only when non-empty (clap treats an empty value as provided).
+    #    `manifest` accepts a package.json file OR a directory containing one (resolved here); each
+    #    `packages` entry becomes a repeatable `--package`; `minify`/`gzip` are presence flags.
     - name: web-modules build
       shell: bash
       env:
-        WEB_MODULES_SRC: ${{ inputs.src }}
-        WEB_MODULES_OUT: ${{ inputs.out }}
-        WEB_MODULES_MOUNT: ${{ inputs.mount }}
-        WEB_MODULES_MINIFY: ${{ inputs.minify }}
-        WEB_MODULES_GZIP: ${{ inputs.gzip }}
+        INPUT_SRC: ${{ inputs.src }}
+        INPUT_OUT: ${{ inputs.out }}
+        INPUT_MOUNT: ${{ inputs.mount }}
+        INPUT_MINIFY: ${{ inputs.minify }}
+        INPUT_GZIP: ${{ inputs.gzip }}
         INPUT_PACKAGES: ${{ inputs.packages }}
         INPUT_MANIFEST: ${{ inputs.manifest }}
         INPUT_TEMPLATE: ${{ inputs.template }}
         INPUT_HTML: ${{ inputs.html }}
       run: |
-        args=()
         # Fail clearly on a missing source dir — almost always a forgotten actions/checkout or a
         # wrong `src` — rather than surfacing a lower-level error from the binary.
-        if [ ! -d "$WEB_MODULES_SRC" ]; then
-          echo "::error::source directory not found: '$WEB_MODULES_SRC' (did the job run actions/checkout first, or is the 'src' input wrong?)"
+        if [ ! -d "$INPUT_SRC" ]; then
+          echo "::error::source directory not found: '$INPUT_SRC' (did the job run actions/checkout first, or is the 'src' input wrong?)"
           exit 1
         fi
+        args=(--out "$INPUT_OUT" --mount "$INPUT_MOUNT")
         manifest="$INPUT_MANIFEST"
         if [ -n "$manifest" ]; then
           if [ -d "$manifest" ]; then manifest="${manifest%/}/package.json"; fi
@@ -237,9 +237,17 @@ runs:
         fi
         if [ -n "$INPUT_TEMPLATE" ]; then args+=(--template "$INPUT_TEMPLATE"); fi
         if [ -n "$INPUT_HTML" ]; then args+=(--html "$INPUT_HTML"); fi
-        pkgs=()
-        if [ -n "$INPUT_PACKAGES" ]; then read -ra pkgs <<< "$INPUT_PACKAGES"; fi
-        web-modules build "${args[@]}" "${pkgs[@]}"
+        # Booleans → presence flags. `--minify` / `--gzip` are CLI-only now; the released binary
+        # carries the `compress` feature, so `--gzip` works.
+        case "$INPUT_MINIFY" in 1 | true | yes | on) args+=(--minify) ;; esac
+        case "$INPUT_GZIP" in 1 | true | yes | on) args+=(--gzip) ;; esac
+        # Each package spec becomes a repeatable `--package`.
+        if [ -n "$INPUT_PACKAGES" ]; then
+          read -ra pkgs <<< "$INPUT_PACKAGES"
+          for p in "${pkgs[@]}"; do args+=(--package "$p"); done
+        fi
+        # The source dir is a positional root.
+        web-modules build "$INPUT_SRC" "${args[@]}"
 
         # Best-effort job summary of what was built (never fail the build over it). find/du/wc are
         # available on every supported runner, incl. Windows git-bash.
@@ -248,16 +256,16 @@ runs:
           echo ""
           echo "| input | value |"
           echo "| --- | --- |"
-          echo "| src → out | \`$WEB_MODULES_SRC\` → \`$WEB_MODULES_OUT\` |"
-          echo "| mount | \`$WEB_MODULES_MOUNT\` |"
+          echo "| src → out | \`$INPUT_SRC\` → \`$INPUT_OUT\` |"
+          echo "| mount | \`$INPUT_MOUNT\` |"
           [ -n "$INPUT_PACKAGES" ] && echo "| packages | \`$INPUT_PACKAGES\` |"
           [ -n "$manifest" ] && echo "| manifest | \`$manifest\` |"
           [ -n "$INPUT_TEMPLATE" ] && echo "| template | \`$INPUT_TEMPLATE\` |"
-          echo "| minify · gzip | \`$WEB_MODULES_MINIFY\` · \`$WEB_MODULES_GZIP\` |"
+          echo "| minify · gzip | \`$INPUT_MINIFY\` · \`$INPUT_GZIP\` |"
           echo ""
-          if [ -d "$WEB_MODULES_OUT" ]; then
-            files=$(find "$WEB_MODULES_OUT" -type f | wc -l | tr -d ' ')
-            size=$(du -sh "$WEB_MODULES_OUT" 2>/dev/null | cut -f1)
-            echo "Built **$files** files into \`$WEB_MODULES_OUT/\` (**$size**)."
+          if [ -d "$INPUT_OUT" ]; then
+            files=$(find "$INPUT_OUT" -type f | wc -l | tr -d ' ')
+            size=$(du -sh "$INPUT_OUT" 2>/dev/null | cut -f1)
+            echo "Built **$files** files into \`$INPUT_OUT/\` (**$size**)."
           fi
         } >> "$GITHUB_STEP_SUMMARY" || true
