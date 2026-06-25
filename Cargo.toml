@@ -52,9 +52,11 @@ axum = ["dep:axum", "dep:tokio", "dep:mime_guess", "dep:include_dir"]
 # Dev server on top of `axum`: compile TS/SCSS on the fly, watch the source tree,
 # live-reload the browser.
 dev = ["axum", "typescript", "scss", "dep:notify", "dep:tower-livereload"]
-# The `web-modules` CLI binary (dev / compile / vendor / ci / npm). `npm-utils/cli` powers the
+# The `web-modules` CLI binary (dev / build / vendor / ci / npm). `npm-utils/cli` powers the
 # `npm` passthrough; it stays behind this opt-in feature so the library path never pulls clap.
-cli = ["dev", "minify", "dep:clap", "npm-utils/cli"]
+# `tera` is pulled in so a plain `--features cli` build renders `.tera` in both `dev` and `build`
+# (they must behave identically); the released binary's `full` already has it.
+cli = ["dev", "minify", "tera", "dep:clap", "npm-utils/cli"]
 # Opt-in: let the `web-modules build` subcommand read its config from `WEB_MODULES_*` environment
 # variables (clap's `env`). Off by default so a plain `--features cli` install stays minimal — clap's
 # env codegen is only compiled when asked for. `clap?/env` flips the feature on only if clap is

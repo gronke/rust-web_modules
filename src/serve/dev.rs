@@ -38,36 +38,87 @@ use crate::mount::Mount;
 
 type Cache = Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>;
 
+/// Which processors the dev server applies, mirroring the build pipeline's
+/// [`Processors`](crate::build::Processors) so `dev` and `build` stay in lock-step. No
+/// minify/gzip — those are build *output* options, meaningless for live serving.
+///
+/// `#[non_exhaustive]`: build from [`DevConfig::default`] (all on, Lit decorators) and
+/// adjust fields.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct DevConfig {
+    /// Compile `.ts`/`.tsx`/`.mts` → JS on the fly. Default on.
+    pub typescript: bool,
+    /// Compile `.scss` → CSS on the fly. Default on.
+    pub scss: bool,
+    /// Render `*.tera` to their stripped targets on the fly (`index.html.tera` served as
+    /// `index.html`). Default on.
+    pub tera: bool,
+    /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`].
+    ///
+    /// [`Decorators::Lit`]: crate::typescript::Decorators::Lit
+    pub ts_decorators: crate::typescript::Decorators,
+    /// Extra SCSS `@use`/`@import` load paths, on top of the mounted source dirs.
+    pub extra_scss_load_paths: Vec<PathBuf>,
+}
+
+impl Default for DevConfig {
+    fn default() -> Self {
+        Self {
+            typescript: true,
+            scss: true,
+            tera: true,
+            ts_decorators: crate::typescript::Decorators::Lit,
+            extra_scss_load_paths: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DevState {
     mounts: Arc<Vec<Mount>>,
     cache: Arc<Cache>,
     /// Baked assets to fall back to when a request isn't a source file.
     fallback: Option<&'static Dir<'static>>,
+    /// Which processors to apply (and how), shared with the bin's `--<name>` toggles.
+    config: Arc<DevConfig>,
 }
 
 enum Kind {
     Ts,
     Scss,
+    #[cfg(feature = "tera")]
+    Tera,
 }
 
 /// Build the dev [`Router`] over flat source `roots` (each mounted at `/`, resolved in
-/// order, first dir wins). For prefix-mounted composition use [`dev_router_mounted`].
+/// order, first dir wins), with all processors on. For prefix-mounted composition use
+/// [`dev_router_mounted`]; to choose which processors run, [`dev_router_with`].
 pub fn dev_router(roots: Vec<PathBuf>) -> Router {
-    build_router(roots.into_iter().map(Mount::root).collect(), None)
+    dev_router_with(roots, DevConfig::default())
+}
+
+/// Like [`dev_router`], but with an explicit [`DevConfig`] (which processors run, and
+/// how) — the toggle-aware entry the `web-modules dev` command uses.
+pub fn dev_router_with(roots: Vec<PathBuf>, config: DevConfig) -> Router {
+    build_router(roots.into_iter().map(Mount::root).collect(), None, config)
 }
 
 /// Like [`dev_router`], but unmatched requests fall back to a baked `include_dir!`
 /// tree (vendored modules, `index.html`, …).
 pub fn dev_router_with_embedded(roots: Vec<PathBuf>, embedded: &'static Dir<'static>) -> Router {
-    build_router(roots.into_iter().map(Mount::root).collect(), Some(embedded))
+    build_router(
+        roots.into_iter().map(Mount::root).collect(),
+        Some(embedded),
+        DevConfig::default(),
+    )
 }
 
 /// Build the dev [`Router`] over prefix-mounted sources: each [`Mount`]'s dir is served
 /// (and, when watched, live-reloaded) under its URL prefix, with TS/SCSS compiled on
 /// the fly.
 pub fn dev_router_mounted(mounts: Vec<Mount>) -> Router {
-    build_router(mounts, None)
+    build_router(mounts, None, DevConfig::default())
 }
 
 /// Like [`dev_router_mounted`], with a baked `include_dir!` fallback.
@@ -75,16 +126,21 @@ pub fn dev_router_mounted_with_embedded(
     mounts: Vec<Mount>,
     embedded: &'static Dir<'static>,
 ) -> Router {
-    build_router(mounts, Some(embedded))
+    build_router(mounts, Some(embedded), DevConfig::default())
 }
 
-fn build_router(mounts: Vec<Mount>, fallback: Option<&'static Dir<'static>>) -> Router {
+fn build_router(
+    mounts: Vec<Mount>,
+    fallback: Option<&'static Dir<'static>>,
+    config: DevConfig,
+) -> Router {
     let livereload = LiveReloadLayer::new();
     spawn_watcher(mounts.clone(), livereload.reloader());
     let state = DevState {
         mounts: Arc::new(mounts),
         cache: Arc::new(Mutex::new(HashMap::new())),
         fallback,
+        config: Arc::new(config),
     };
     Router::new()
         .fallback(serve_asset)
@@ -92,9 +148,19 @@ fn build_router(mounts: Vec<Mount>, fallback: Option<&'static Dir<'static>>) -> 
         .layer(livereload)
 }
 
-/// Bind `addr` and serve [`dev_router`] over `roots` until the process stops.
+/// Bind `addr` and serve [`dev_router`] over `roots` (all processors on) until the
+/// process stops.
 pub async fn serve(roots: Vec<PathBuf>, addr: SocketAddr) -> std::io::Result<()> {
-    let app = dev_router(roots);
+    serve_with(roots, addr, DevConfig::default()).await
+}
+
+/// Like [`serve`], but with an explicit [`DevConfig`] (which processors run, and how).
+pub async fn serve_with(
+    roots: Vec<PathBuf>,
+    addr: SocketAddr,
+    config: DevConfig,
+) -> std::io::Result<()> {
+    let app = dev_router_with(roots, config);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("web-modules dev server on http://{addr}/  (Ctrl-C to stop)");
     axum::serve(listener, app).await
@@ -139,24 +205,48 @@ fn matching<'a>(state: &'a DevState, requested: &str) -> Vec<(&'a Mount, String)
 
 /// Resolve a request to `(bytes, content-type)`, **dir-observation-order-dominant**:
 /// for each matching mount in order, the first that can produce the requested target
-/// wins (compile a source `.ts`/`.scss`, else serve a static file), then the embedded
+/// wins — render a `.tera` (checked first, the final-overlay precedence build uses),
+/// else compile a source `.ts`/`.scss`, else serve a static file — then the embedded
 /// fallback.
 fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)>, String> {
     for (mount, rel) in matching(state, requested) {
+        // `/foo.html` (any rendered target) ← render `foo.html.tera` from this dir, the live
+        // counterpart of the build pipeline's tree-wide `.tera`. Checked **first** so a `.tera`
+        // takes precedence over a same-named compiled/static target — matching build, where the
+        // tera pass overlays everything. The `.tera` source itself stays hidden from raw serving
+        // (it's a source extension).
+        #[cfg(feature = "tera")]
+        if state.config.tera && !rel.is_empty() {
+            if let Some(src) = contained_file(mount.dir(), &format!("{rel}.tera")) {
+                // Never render a `_`-prefixed partial as a page (matches the build tree).
+                let is_partial = src
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('_'));
+                if !is_partial {
+                    let html = compile_cached(state, &src, Kind::Tera)?;
+                    return Ok(Some((html, content_type(&rel))));
+                }
+            }
+        }
         // `/foo.js` ← compile `foo.{ts,tsx,mts}` from this dir.
-        if let Some(stem) = rel.strip_suffix(".js") {
-            for ext in ["ts", "tsx", "mts"] {
-                if let Some(src) = contained_file(mount.dir(), &format!("{stem}.{ext}")) {
-                    let js = compile_cached(state, &src, Kind::Ts)?;
-                    return Ok(Some((js, "text/javascript; charset=utf-8".into())));
+        if state.config.typescript {
+            if let Some(stem) = rel.strip_suffix(".js") {
+                for ext in ["ts", "tsx", "mts"] {
+                    if let Some(src) = contained_file(mount.dir(), &format!("{stem}.{ext}")) {
+                        let js = compile_cached(state, &src, Kind::Ts)?;
+                        return Ok(Some((js, "text/javascript; charset=utf-8".into())));
+                    }
                 }
             }
         }
         // `/foo.css` ← compile `foo.scss` from this dir.
-        if let Some(stem) = rel.strip_suffix(".css") {
-            if let Some(src) = contained_file(mount.dir(), &format!("{stem}.scss")) {
-                let css = compile_cached(state, &src, Kind::Scss)?;
-                return Ok(Some((css, "text/css; charset=utf-8".into())));
+        if state.config.scss {
+            if let Some(stem) = rel.strip_suffix(".css") {
+                if let Some(src) = contained_file(mount.dir(), &format!("{stem}.scss")) {
+                    let css = compile_cached(state, &src, Kind::Scss)?;
+                    return Ok(Some((css, "text/css; charset=utf-8".into())));
+                }
             }
         }
         // Static file in this dir — but never serve a *source* raw (a `.scss`/`.ts`
@@ -183,8 +273,9 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
     Ok(None)
 }
 
-/// Compile `src` (TS or SCSS), caching by modification time. SCSS `@use`/`@import`
-/// load paths span every mounted dir.
+/// Compile `src` (TS, SCSS, or Tera), caching by modification time. SCSS `@use`/`@import`
+/// load paths span every mounted dir (plus any `extra_scss_load_paths`); Tera renders
+/// with an empty `importmap` variable (the dev server doesn't vendor).
 fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, String> {
     let mtime = std::fs::metadata(src)
         .and_then(|m| m.modified())
@@ -202,13 +293,38 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
     let out = match kind {
         Kind::Ts => {
             let source = std::fs::read_to_string(src).map_err(|e| e.to_string())?;
-            crate::typescript::compile_str(&source, src)
+            let options = crate::typescript::TranspileOptions {
+                decorators: state.config.ts_decorators,
+                ..Default::default()
+            };
+            crate::typescript::compile_str_with(&source, src, &options)
                 .map_err(|e| e.to_string())?
                 .into_bytes()
         }
         Kind::Scss => {
-            let load_paths: Vec<&Path> = state.mounts.iter().map(|m| m.dir()).collect();
+            let mut load_paths: Vec<&Path> = state.mounts.iter().map(|m| m.dir()).collect();
+            load_paths.extend(
+                state
+                    .config
+                    .extra_scss_load_paths
+                    .iter()
+                    .map(PathBuf::as_path),
+            );
             crate::scss::compile_file(src, &load_paths)
+                .map_err(|e| e.to_string())?
+                .into_bytes()
+        }
+        #[cfg(feature = "tera")]
+        Kind::Tera => {
+            // dev doesn't vendor, so the import map is empty here (a no-op `<script>`).
+            // Live TS/SCSS still load by their relative URLs; a baked fallback may carry
+            // a real map, but live source serving doesn't need one.
+            let mut ctx = crate::templates::Context::new();
+            ctx.insert(
+                "importmap",
+                &crate::importmap::Importmap::new().to_script_tag(),
+            );
+            crate::templates::render_file(src, &ctx)
                 .map_err(|e| e.to_string())?
                 .into_bytes()
         }
@@ -257,10 +373,15 @@ mod tests {
     use super::*;
 
     fn state(mounts: Vec<Mount>) -> DevState {
+        state_with(mounts, DevConfig::default())
+    }
+
+    fn state_with(mounts: Vec<Mount>, config: DevConfig) -> DevState {
         DevState {
             mounts: Arc::new(mounts),
             cache: Arc::new(Mutex::new(HashMap::new())),
             fallback: None,
+            config: Arc::new(config),
         }
     }
 
@@ -322,5 +443,76 @@ mod tests {
         assert!(resolve(&state, "app.ts").unwrap().is_none());
         assert!(resolve(&state, "app.css").unwrap().is_some()); // compiled from app.scss
         assert!(resolve(&state, "app.js").unwrap().is_some()); // compiled from app.ts
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn dev_renders_tera_to_target() {
+        // The live counterpart of the build pipeline's tree-wide `.tera`: a request for
+        // the stripped target renders the `.tera` (the dev import map is empty).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("index.html.tera"),
+            "<head>{{ importmap | safe }}</head>",
+        )
+        .unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, ct) = resolve(&state, "index.html").unwrap().unwrap();
+        let html = String::from_utf8(bytes).unwrap();
+        assert!(
+            html.contains("<script type=\"importmap\">"),
+            "rendered with the importmap var; got:\n{html}"
+        );
+        assert!(ct.starts_with("text/html"), "served as html; got {ct}");
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn dev_hides_tera_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html.tera"), "<p>hi</p>").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        // The rendered target is reachable; the raw `.tera` source is not.
+        assert!(resolve(&state, "index.html").unwrap().is_some());
+        assert!(resolve(&state, "index.html.tera").unwrap().is_none());
+    }
+
+    #[test]
+    fn dev_respects_disabled_processor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.scss"), "a{color:red}").unwrap();
+        // SCSS disabled ⇒ no on-the-fly compile, and the `.scss` source stays hidden,
+        // so `/app.css` 404s.
+        let config = DevConfig {
+            scss: false,
+            ..DevConfig::default()
+        };
+        let state = state_with(vec![Mount::root(root)], config);
+        assert!(resolve(&state, "app.css").unwrap().is_none());
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn dev_tera_wins_over_literal_same_target() {
+        // Lock-step with the build pipeline: a `.tera` overlays a same-named literal (dev checks
+        // `.tera` first, build renders it as a final overlay).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html"), "LITERAL").unwrap();
+        std::fs::write(root.join("index.html.tera"), "TERA").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&state, "index.html").unwrap().unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "TERA",
+            "dev renders the .tera over the literal same-target"
+        );
     }
 }

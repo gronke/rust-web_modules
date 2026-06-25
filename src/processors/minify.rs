@@ -73,6 +73,18 @@ pub fn minify_directory(dir: &Path) -> Result<usize> {
     Ok(count)
 }
 
+// Minify has no flags of its own beyond the on/off toggle (it's off by default).
+// (`--minify` / `--no-minify`.)
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    MinifyArgs,
+    minify,
+    "minify",
+    no_minify,
+    "no-minify",
+    crate::cli_config::NoConfig
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

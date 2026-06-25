@@ -5,7 +5,7 @@
 //! Call from a consumer `build.rs` (with web_modules as a `build-dependency`):
 //!
 //! ```no_run
-//! use std::path::{Path, PathBuf};
+//! use std::path::PathBuf;
 //! use web_modules::build::{build, BuildOptions};
 //! use web_modules::vendor::PackageSpec;
 //!
@@ -13,40 +13,86 @@
 //! let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
 //! build(&BuildOptions {
 //!     specs: &[PackageSpec::npm("lit", "^3")],
-//!     src: Path::new("web"),
+//!     roots: &[PathBuf::from("web")],
 //!     out: &out,
 //!     mount: "/web_modules",
 //!     html: "<!doctype html>{importmap}<script type=module src=/app.js></script>",
 //!     template: None,
+//!     processors: Default::default(),
 //!     output: Default::default(),
 //! })?;
 //! # Ok(()) }
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::vendor::{self, PackageSpec};
 use crate::{Error, Result};
 
 /// Inputs for [`build`].
 pub struct BuildOptions<'a> {
-    /// Packages to vendor into `<out>/web_modules/`.
+    /// Packages to vendor into `<out>/web_modules/`. **Empty ⇒ no vendoring** — the
+    /// source tree is just compiled statically, exactly as the dev server serves a
+    /// non-vendored tree.
     pub specs: &'a [PackageSpec],
-    /// Source directory (TypeScript, SCSS, and other static files).
-    pub src: &'a Path,
+    /// Source root(s), merged first-match-wins (the first root wins a path conflict),
+    /// exactly as the dev server overlays them. Usually one (the source directory);
+    /// pass `std::slice::from_ref(&dir)` for the single-root case.
+    pub roots: &'a [PathBuf],
     /// Output directory (e.g. `$OUT_DIR/dist`).
     pub out: &'a Path,
     /// URL prefix the vendored modules are served at (e.g. `"/web_modules"`).
     pub mount: &'a str,
-    /// `index.html` template; the literal `{importmap}` is replaced with the
-    /// generated `<script type="importmap">…</script>`.
+    /// `index.html` template; the literal `{importmap}` is replaced with the generated
+    /// `<script type="importmap">…</script>`. Used **only as a fallback** for `index.html`
+    /// when the source tree didn't already produce one (e.g. via an `index.html.tera`).
     pub html: &'a str,
-    /// Optional Tera template file, rendered with an `importmap` variable (the
-    /// `<script type="importmap">…</script>` tag) instead of `html` when `Some`.
-    /// Requires the `tera` feature.
+    /// Optional Tera template file for `index.html`, rendered with an `importmap`
+    /// variable instead of `html` when `Some` (same fallback rule as `html`). Requires
+    /// the `tera` feature.
     pub template: Option<&'a Path>,
+    /// Which source processors run (TypeScript, SCSS, Tera) and their tuning — the
+    /// static-build counterpart of the dev server's processor set.
+    pub processors: Processors,
     /// Output optimization: minify the emitted JS and/or write `.gz` sidecars.
     pub output: Output,
+}
+
+/// Which source processors run, and their tuning — the static-build counterpart of the
+/// dev server's processor set, so `build` and `dev` stay in lock-step.
+///
+/// `#[non_exhaustive]`, so new processors don't break callers: build from
+/// [`Processors::default`] and adjust fields. The defaults mirror the `default` Cargo
+/// features — TypeScript, SCSS and Tera all on. A field has effect only when its Cargo
+/// feature is compiled in (e.g. `scss` needs the `scss` feature).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Processors {
+    /// Transform TypeScript / modern JS → browser JS. Default on.
+    pub typescript: bool,
+    /// Compile SCSS → CSS. Default on.
+    pub scss: bool,
+    /// Render `*.tera` to their stripped targets (`index.html.tera` → `index.html`).
+    /// Default on.
+    pub tera: bool,
+    /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`].
+    ///
+    /// [`Decorators::Lit`]: crate::typescript::Decorators::Lit
+    pub ts_decorators: crate::typescript::Decorators,
+    /// Extra SCSS `@use`/`@import` load paths, on top of the source roots and `out`.
+    pub extra_scss_load_paths: Vec<PathBuf>,
+}
+
+impl Default for Processors {
+    fn default() -> Self {
+        Self {
+            typescript: true,
+            scss: true,
+            tera: true,
+            ts_decorators: crate::typescript::Decorators::Lit,
+            extra_scss_load_paths: Vec::new(),
+        }
+    }
 }
 
 /// Output-optimization toggles. Each processor applies what it can: TS minifies,
@@ -92,22 +138,61 @@ fn rerun_if_changed(path: &Path) {
 /// In a build script (cargo sets `OUT_DIR`) also emits `cargo:rerun-if-changed` for the source tree.
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     std::fs::create_dir_all(opts.out)?;
-    let mut importmap = vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?;
+
+    // Vendor only when there are packages to vendor. A non-vendored source tree (no
+    // specs and no `--manifest`) just compiles statically — the same thing the dev
+    // server does serving such a tree, only emitted instead of served.
+    let mut importmap = if opts.specs.is_empty() {
+        crate::importmap::Importmap::new()
+    } else {
+        vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?
+    };
+
+    // SCSS `@use`/`@import` load paths span every source root (matching the dev server),
+    // plus the output dir (so vendored stylesheets under `<out>/web_modules` resolve) and
+    // any explicit `--scss-load-path`.
+    #[cfg(feature = "scss")]
+    let load_paths: Vec<&Path> = {
+        let mut paths: Vec<&Path> = opts.roots.iter().map(PathBuf::as_path).collect();
+        paths.push(opts.out);
+        paths.extend(
+            opts.processors
+                .extra_scss_load_paths
+                .iter()
+                .map(PathBuf::as_path),
+        );
+        paths
+    };
+
     let transpile = crate::typescript::TranspileOptions {
         minify: opts.output.minify,
+        decorators: opts.processors.ts_decorators,
         ..Default::default()
     };
-    crate::typescript::compile_directory_with(opts.src, opts.out, &transpile)?;
-    #[cfg(feature = "scss")]
-    crate::scss::compile_directory(opts.src, opts.out, &[opts.out])?;
-    crate::static_files::copy_static(opts.src, opts.out)?;
 
-    // Resolve the runtime helpers the transform emitted (decorator helper, etc.).
+    // Compile each root last-to-first, so the FIRST root wins a path conflict (it is
+    // written last, overwriting) — the order the dev server overlays roots in.
+    for root in opts.roots.iter().rev() {
+        if opts.processors.typescript {
+            crate::typescript::compile_directory_with(root, opts.out, &transpile)?;
+        }
+        #[cfg(feature = "scss")]
+        if opts.processors.scss {
+            crate::scss::compile_directory(root, opts.out, &load_paths)?;
+        }
+        // Carry across everything the processors don't transform (HTML, images, JSON, …);
+        // sources (`.ts`/`.scss`/`.tera`) are skipped by `copy_static`.
+        crate::static_files::copy_static(root, opts.out)?;
+    }
+
+    // Resolve the runtime helpers the transform emitted (decorator helper, etc.) — even a
+    // non-vendored build may need these.
     importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
 
     // Fail the build if any emitted module imports a bare specifier the import map
     // can't resolve (a transform runtime helper, a forgotten dependency, …) — so a
-    // browser-load failure becomes a clear build error instead.
+    // browser-load failure becomes a clear build error instead. This still applies to a
+    // non-vendored build: importing a bare specifier you didn't vendor is a real error.
     let unresolved = unresolved_imports(opts.out, &importmap)?;
     if !unresolved.is_empty() {
         let details = unresolved
@@ -126,14 +211,36 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
     importmap.write_to(&opts.out.join("importmap.json"))?;
 
-    let html = match opts.template {
-        Some(template) => {
-            rerun_if_changed(template);
-            render_template(template, &importmap)?
+    // Render every `*.tera` in the tree to its stripped target (`index.html.tera` →
+    // `index.html`), with the import map available as the `importmap` variable. Looped
+    // last-to-first so the first root wins, matching the compile order. The static
+    // counterpart of the dev server's on-the-fly `.tera` rendering.
+    #[cfg(feature = "tera")]
+    if opts.processors.tera {
+        for root in opts.roots.iter().rev() {
+            render_tera_tree(root, opts.out, &importmap)?;
         }
-        None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
-    };
-    std::fs::write(opts.out.join("index.html"), html)?;
+    }
+
+    // Entry-page fallback: synthesise `index.html` from `--template` / inline `--html` only when
+    // the *source tree* doesn't provide one (a root-level `index.html`, or an `index.html.tera`
+    // when tera is on). Keyed off the source tree, not `out/index.html`: probing the output would
+    // wrongly skip the refresh on an incremental rebuild into a reused output dir (a build
+    // script's `OUT_DIR`), leaving a stale page when `--html`/`--template` or the import map changed.
+    let tera_on = cfg!(feature = "tera") && opts.processors.tera;
+    let tree_provides_index = opts.roots.iter().any(|root| {
+        root.join("index.html").exists() || (tera_on && root.join("index.html.tera").exists())
+    });
+    if !tree_provides_index {
+        let html = match opts.template {
+            Some(template) => {
+                rerun_if_changed(template);
+                render_template(template, &importmap)?
+            }
+            None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
+        };
+        std::fs::write(opts.out.join("index.html"), html)?;
+    }
 
     #[cfg(feature = "compress")]
     if opts.output.gzip {
@@ -143,12 +250,14 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // Re-run the build script when any source file changes. A bare `rerun-if-changed`
     // on the directory only catches add/remove (the directory's own mtime), not edits to
     // existing files — which would leave an *embedded* build serving stale assets — so
-    // walk the tree and emit every entry (the root dir included, to catch add/remove).
-    for entry in walkdir::WalkDir::new(opts.src)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        rerun_if_changed(entry.path());
+    // walk every root and emit every entry (the root dir included, to catch add/remove).
+    for root in opts.roots {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            rerun_if_changed(entry.path());
+        }
     }
     Ok(())
 }
@@ -262,6 +371,59 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
     )
 }
 
+/// Render every `*.tera` under `root` to its stripped target under `out`
+/// (`index.html.tera` → `index.html`), skipping `_`-prefixed partials, with the
+/// import-map `<script>` tag exposed as the `importmap` variable. The static counterpart
+/// of the dev server's on-the-fly `.tera` rendering. Returns the number rendered.
+///
+/// `tera::one_off` (via [`crate::templates`]) has no template registry, so each file
+/// renders independently — `{% include %}` / `{% extends %}` across files aren't
+/// supported (hence the `_`-partial skip is a convention, not an inheritance system).
+///
+/// Runs as a final overlay (after vendoring + the import-map/unresolved-import checks), so a
+/// `*.tera` takes precedence over a same-named compiled/static target — matching the dev server,
+/// which checks `.tera` first. Two consequences of that placement, both for unusual configs: across
+/// multiple roots a later root's `.tera` overwrites an *earlier* root's literal same-named file
+/// (the dev server resolves per-root, so the earlier root wins there — a minor divergence), and JS
+/// emitted *by* a `.tera` (e.g. `app.js.tera`) is not scanned for unresolved bare imports.
+#[cfg(feature = "tera")]
+fn render_tera_tree(
+    root: &Path,
+    out: &Path,
+    importmap: &crate::importmap::Importmap,
+) -> Result<usize> {
+    let mut ctx = crate::templates::Context::new();
+    ctx.insert("importmap", &importmap.to_script_tag());
+    let mut count = 0;
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        let is_tera = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("tera"));
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !is_tera || name.starts_with('_') {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| Error::Template(e.to_string()))?;
+        // Drop the final `.tera`: `index.html.tera` → `index.html`, `page.tera` → `page`.
+        let dest = out.join(rel).with_extension("");
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let html = crate::templates::render_file(path, &ctx)?;
+        std::fs::write(&dest, html)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Render `index.html` from a Tera `template`, exposing the import-map script tag
 /// as an `importmap` variable.
 #[cfg(feature = "tera")]
@@ -370,5 +532,168 @@ mod tests {
         let html = render_template(&tpl, &map).unwrap();
         assert!(html.contains("<script type=\"importmap\">"));
         assert!(html.contains("/web_modules/lit/index.js"));
+    }
+
+    /// A `BuildOptions` over a single root with no vendoring and the all-on defaults.
+    fn opts<'a>(roots: &'a [PathBuf], out: &'a Path) -> BuildOptions<'a> {
+        BuildOptions {
+            specs: &[],
+            roots,
+            out,
+            mount: "/web_modules",
+            html: "<!doctype html>FALLBACK{importmap}",
+            template: None,
+            processors: Processors::default(),
+            output: Output::default(),
+        }
+    }
+
+    #[test]
+    fn build_skips_vendor_when_specs_empty() {
+        // The issue's repro: `build` a non-vendored tree (no specs / no package.json).
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.html"), "<p>hi</p>").unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+
+        assert!(
+            !out.join("web_modules").exists(),
+            "no specs ⇒ no vendoring, so no web_modules/ dir"
+        );
+        assert!(out.join("page.html").exists(), "static file copied through");
+        assert!(
+            out.join("importmap.json").exists(),
+            "empty import map emitted"
+        );
+        assert!(
+            out.join("index.html").exists(),
+            "fallback index.html written"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_renders_tera_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("index.html.tera"),
+            "<head>{{ importmap | safe }}</head>",
+        )
+        .unwrap();
+        std::fs::write(src.join("_partial.html.tera"), "PARTIAL").unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains("<script type=\"importmap\">"),
+            "the `.tera` rendered with the importmap var; got:\n{index}"
+        );
+        assert!(
+            !index.contains("FALLBACK"),
+            "an in-tree index.html.tera wins over the --html fallback"
+        );
+        assert!(
+            !out.join("_partial.html").exists(),
+            "`_`-prefixed partials are not emitted"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_first_root_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("index.html.tera"), "FROM_A").unwrap();
+        std::fs::write(b.join("index.html.tera"), "FROM_B").unwrap();
+
+        let roots = vec![a, b];
+        build(&opts(&roots, &out)).unwrap();
+
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains("FROM_A"),
+            "first root wins a conflict; got: {index}"
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_import_errors_without_vendoring() {
+        // A non-vendored build that imports a bare specifier it never vendored is still a
+        // real error (the import map can't resolve it).
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        // `LitElement` is *used*, so the transform keeps the bare `"lit"` import.
+        std::fs::write(
+            src.join("app.ts"),
+            "import { LitElement } from \"lit\";\nexport class X extends LitElement {}",
+        )
+        .unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        assert!(
+            matches!(err, Error::Build(_)),
+            "an unvendored bare import is a build error; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_fallback_index_refreshes_on_rebuild() {
+        // Regression guard: the `--html` fallback must rewrite index.html on every build, even
+        // into a reused output dir (a build script's OUT_DIR). Keying the skip off `out/index.html`
+        // existing (rather than the source tree) would leave a stale page on rebuild.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("data.json"), "{}").unwrap(); // the tree provides no index
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.html = "<!doctype html>ONE";
+        build(&o).unwrap();
+        assert!(std::fs::read_to_string(out.join("index.html"))
+            .unwrap()
+            .contains("ONE"));
+
+        // Rebuild into the SAME out with a changed `--html`: index.html must refresh, not stick.
+        o.html = "<!doctype html>TWO";
+        build(&o).unwrap();
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains("TWO") && !index.contains("ONE"),
+            "fallback index.html must refresh on rebuild; got:\n{index}"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_tera_wins_over_literal_same_target() {
+        // A `*.tera` overlays a same-named literal in the same root — the precedence the dev
+        // server also applies (it checks `.tera` first), so `dev` and `build` stay in lock-step.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("index.html"), "LITERAL").unwrap();
+        std::fs::write(src.join("index.html.tera"), "TERA").unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains("TERA") && !index.contains("LITERAL"),
+            "the .tera overlays the literal same-target; got:\n{index}"
+        );
     }
 }

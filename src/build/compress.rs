@@ -54,6 +54,18 @@ fn append_gz(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+// Gzip has no flags of its own beyond the on/off toggle (it's off by default). The CLI
+// flag is `gzip`, matching the `--gzip` users already know. (`--gzip` / `--no-gzip`.)
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    GzipArgs,
+    gzip,
+    "gzip",
+    no_gzip,
+    "no-gzip",
+    crate::cli_config::NoConfig
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

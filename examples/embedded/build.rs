@@ -30,14 +30,16 @@ const HTML: &str = r#"<!doctype html>
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
+    let web = manifest.join("web");
 
     build(&BuildOptions {
         specs: &[], // no npm dependencies → the build never touches the network
-        src: &manifest.join("web"),
+        roots: std::slice::from_ref(&web),
         out: &out,
         mount: "/web_modules",
         html: HTML,
         template: None,
+        processors: Default::default(),
         // The whole point of this example: minify the emitted JS and write `.gz`
         // sidecars, so what ends up embedded is production-sized.
         output: Output::optimized(),

@@ -68,6 +68,48 @@ impl TranspileOptions {
     }
 }
 
+/// `--typescript-decorators` value: the CLI mirror of [`Decorators`] (which is
+/// `#[non_exhaustive]` and not a `clap::ValueEnum`).
+#[cfg(feature = "cli")]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DecoratorsArg {
+    /// Legacy decorators with Lit's class-field semantics (the default).
+    #[default]
+    Lit,
+    /// Plain oxc defaults, for non-Lit / decorator-free sources.
+    Standard,
+}
+
+#[cfg(feature = "cli")]
+impl From<DecoratorsArg> for Decorators {
+    fn from(value: DecoratorsArg) -> Self {
+        match value {
+            DecoratorsArg::Lit => Decorators::Lit,
+            DecoratorsArg::Standard => Decorators::Standard,
+        }
+    }
+}
+
+/// Feature-specific `--typescript-*` flags, paired with the `--typescript` /
+/// `--no-typescript` toggle in [`TypescriptArgs`].
+#[cfg(feature = "cli")]
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct TypescriptConfig {
+    /// Decorator lowering: `lit` (default) or `standard`.
+    #[arg(long = "typescript-decorators", value_enum, default_value = "lit")]
+    pub decorators: DecoratorsArg,
+}
+
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    TypescriptArgs,
+    typescript,
+    "typescript",
+    no_typescript,
+    "no-typescript",
+    TypescriptConfig
+);
+
 /// Build oxc transform options from our [`TranspileOptions`]. The Lit preset sets
 /// legacy decorators plus class fields *assigned* rather than *defined* (the
 /// `useDefineForClassFields: false` equivalent).

@@ -45,20 +45,19 @@ Buildless web frontend toolchain (no Node)
 Usage: web-modules <COMMAND>
 
 Commands:
-  dev      Dev server: compile TS/SCSS on the fly, watch the tree, live-reload
-  compile  Compile source root(s) into an output tree (TS→JS, SCSS→CSS, static files copied)
-  build    Build a complete, deployable `dist/` - the full vendor→transform→render pipeline
-  vendor   Vendor npm packages into web_modules/ + an import map
-  ci       Install a package-lock.json's exact tree into node_modules/ - a pure-Rust npm ci
-  npm      Run an npm-utils command (add · install · ci · upgrade · …)
-  help     Print this message or the help of the given subcommand(s)
+  dev     Dev server: compile TS/SCSS on the fly, render `*.tera`, watch the tree, live-reload
+  build   Build a deployable output tree — the static counterpart of `dev`
+  vendor  Vendor npm packages into web_modules/ + an import map
+  ci      Install a package-lock.json's exact tree into node_modules/ - a pure-Rust npm ci
+  npm     Run an npm-utils command (add · install · ci · upgrade · …)
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
 
-Run `web-modules <command> --help` for flags.
+`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
 
 ## Library
 
@@ -112,7 +111,7 @@ jobs:
         uses: actions/deploy-pages@v5
 ```
 
-Enable Pages once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so pass `mount: /<repo>/web_modules` and keep entry scripts **relative** (`./app.js`); a user/org `*.github.io` page serves at the root (default `mount: /web_modules`). Inputs can also come from `WEB_MODULES_*` env vars. This repo dogfoods the action — [`examples/gh-pages/`](examples/gh-pages) is built and deployed to Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml). Run `web-modules build --help` for every flag.
+Enable Pages once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so pass `mount: /<repo>/web_modules` and keep entry scripts **relative** (`./app.js`); a user/org `*.github.io` page serves at the root (default `mount: /web_modules`). This repo dogfoods the action — [`examples/gh-pages/`](examples/gh-pages) is built and deployed to Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml). Run `web-modules build --help` for every flag.
 
 ## Examples
 

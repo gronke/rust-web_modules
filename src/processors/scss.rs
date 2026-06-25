@@ -70,6 +70,19 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path, load_paths: &[&Path]) -
     Ok(count)
 }
 
+/// Feature-specific `--scss-*` flags, paired with the `--scss` / `--no-scss` toggle in
+/// [`ScssArgs`].
+#[cfg(feature = "cli")]
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct ScssConfig {
+    /// Extra SCSS `@use`/`@import` load path(s), on top of the source roots (repeatable).
+    #[arg(long = "scss-load-path", value_name = "DIR")]
+    pub load_paths: Vec<std::path::PathBuf>,
+}
+
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(ScssArgs, scss, "scss", no_scss, "no-scss", ScssConfig);
+
 #[cfg(test)]
 mod tests {
     use super::*;
