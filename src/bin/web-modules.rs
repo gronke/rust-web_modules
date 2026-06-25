@@ -59,7 +59,7 @@ enum Command {
     Build {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
-        /// Output directory. Required — from `--out`, or `web-modules.out` in package.json.
+        /// Output directory. Defaults to `dist`, or `web-modules.out` in package.json.
         #[arg(long)]
         out: Option<PathBuf>,
         /// URL prefix the vendored modules are served at (default `/web_modules`). Under a GitHub
@@ -436,13 +436,6 @@ fn resolve_decorators(
     cli.map(Into::into).or(block).unwrap_or_default()
 }
 
-/// `build`'s output dir — required, from `--out` (or `WEB_MODULES_OUT`) or `web-modules.out`.
-fn resolve_out(cli: Option<PathBuf>, block: Option<PathBuf>) -> Res<PathBuf> {
-    cli.or(block).ok_or_else(|| {
-        "build: an output dir is required - pass --out <dir> or set web-modules.out".into()
-    })
-}
-
 #[tokio::main]
 async fn main() -> Res {
     match Cli::parse().command {
@@ -488,7 +481,7 @@ async fn main() -> Res {
             let specs = build_vendor_specs(&packages, &manifests, false)?;
 
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
-            let out = resolve_out(out, cfg.out)?;
+            let out = pick(out, cfg.out, PathBuf::from("dist"));
             let mount = pick(mount, cfg.mount, "/web_modules".to_string());
             let html = pick(html, cfg.html, DEFAULT_HTML.to_string());
             let template = template.or(cfg.template);
@@ -610,23 +603,17 @@ mod tests {
     }
 
     #[test]
-    fn build_out_required_from_cli_or_block() {
-        // `--out` is no longer clap-required (a `web-modules.out` block entry can supply it), so a
-        // bare `build web` now PARSES — the requirement moved to resolution.
-        assert!(Cli::try_parse_from(["web-modules", "build", "web"]).is_ok());
-        // Neither source → error; either alone → that value; CLI wins over the block.
-        assert!(resolve_out(None, None).is_err());
+    fn build_out_defaults_to_dist() {
+        // `--out` wins, then `web-modules.out`, then the `dist` convention.
+        let dist = PathBuf::from("dist");
+        assert_eq!(pick(None::<PathBuf>, None, dist.clone()), dist);
         assert_eq!(
-            resolve_out(Some("d".into()), None).unwrap(),
-            PathBuf::from("d")
-        );
-        assert_eq!(
-            resolve_out(None, Some("b".into())).unwrap(),
+            pick(None, Some(PathBuf::from("b")), dist.clone()),
             PathBuf::from("b")
         );
         assert_eq!(
-            resolve_out(Some("d".into()), Some("b".into())).unwrap(),
-            PathBuf::from("d")
+            pick(Some(PathBuf::from("a")), Some(PathBuf::from("b")), dist),
+            PathBuf::from("a")
         );
     }
 
