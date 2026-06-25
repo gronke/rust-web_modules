@@ -191,7 +191,7 @@ impl CompilerConfig {
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
             #[cfg(not(feature = "compress"))]
             gzip: false,
-            ts_decorators: resolve_decorators(self.typescript.config.decorators, cfg.ts_decorators),
+            ts_decorators: self.typescript.config.decorators.into(),
             // Additive: CLI `--scss-load-path`s first, then the block's `scss.loadPaths`.
             extra_scss_load_paths: {
                 let mut paths = self.scss.config.load_paths.clone();
@@ -288,7 +288,6 @@ struct PkgConfig {
     typescript: Option<bool>,
     scss: Option<bool>,
     tera: Option<bool>,
-    ts_decorators: Option<web_modules::typescript::Decorators>,
     scss_load_paths: Vec<PathBuf>,
 }
 
@@ -341,10 +340,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
             "minify" => cfg.minify = Some(as_bool(val, "web-modules.minify")?),
             "gzip" => cfg.gzip = Some(as_bool(val, "web-modules.gzip")?),
             "typescript" => {
-                cfg.typescript = Some(processor_enabled(val, "web-modules.typescript")?);
-                if let Some(d) = val.as_object().and_then(|o| o.get("decorators")) {
-                    cfg.ts_decorators = Some(parse_decorators(d)?);
-                }
+                cfg.typescript = Some(processor_enabled(val, "web-modules.typescript")?)
             }
             "scss" => {
                 cfg.scss = Some(processor_enabled(val, "web-modules.scss")?);
@@ -367,18 +363,6 @@ fn processor_enabled(val: &Value, ctx: &str) -> Res<bool> {
         Value::Bool(b) => Ok(*b),
         Value::Object(_) => Ok(true),
         _ => Err(format!("{ctx} must be a boolean or an object").into()),
-    }
-}
-
-fn parse_decorators(val: &Value) -> Res<web_modules::typescript::Decorators> {
-    use web_modules::typescript::Decorators;
-    match as_string(val, "web-modules.typescript.decorators")?.as_str() {
-        "lit" => Ok(Decorators::Lit),
-        "standard" => Ok(Decorators::Standard),
-        other => Err(format!(
-            "web-modules.typescript.decorators must be \"lit\" or \"standard\", got {other:?}"
-        )
-        .into()),
     }
 }
 
@@ -426,14 +410,6 @@ fn pick_vec<T>(cli: Vec<T>, block: Vec<T>) -> Vec<T> {
     } else {
         cli
     }
-}
-
-/// `--typescript-decorators` (if passed) wins, else the block, else the built-in default (`Lit`).
-fn resolve_decorators(
-    cli: Option<web_modules::typescript::DecoratorsArg>,
-    block: Option<web_modules::typescript::Decorators>,
-) -> web_modules::typescript::Decorators {
-    cli.map(Into::into).or(block).unwrap_or_default()
 }
 
 #[tokio::main]
@@ -745,13 +721,12 @@ mod tests {
 
     #[test]
     fn parses_full_block() {
-        use web_modules::typescript::Decorators;
         let dir = write_pkg(
             r#"{ "web-modules": {
                 "roots": ["web", "shared"], "out": "dist", "mount": "/m",
                 "html": "<x>", "template": "shell.html.tera", "packages": ["lit@^3"],
                 "minify": true, "gzip": false,
-                "typescript": { "decorators": "standard" },
+                "typescript": true,
                 "scss": { "loadPaths": ["styles"] },
                 "tera": false
             } }"#,
@@ -766,8 +741,7 @@ mod tests {
         assert_eq!(cfg.packages, ["lit@^3"]);
         assert_eq!(cfg.minify, Some(true));
         assert_eq!(cfg.gzip, Some(false));
-        assert_eq!(cfg.typescript, Some(true)); // object form enables
-        assert_eq!(cfg.ts_decorators, Some(Decorators::Standard));
+        assert_eq!(cfg.typescript, Some(true)); // bool form enables
         assert_eq!(cfg.scss, Some(true));
         assert_eq!(cfg.scss_load_paths, [PathBuf::from("styles")]);
         assert_eq!(cfg.tera, Some(false)); // bool form disables
@@ -792,11 +766,10 @@ mod tests {
     #[test]
     fn malformed_block_errors() {
         for bad in [
-            r#"{"web-modules": []}"#,                                  // not an object
-            r#"{"web-modules": {"mount": 5}}"#,                        // wrong scalar type
-            r#"{"web-modules": {"scss": 3}}"#,                         // processor not bool/object
-            r#"{"web-modules": {"typescript": {"decorators": "x"}}}"#, // bad enum
-            r#"{ not json "#,                                          // malformed JSON
+            r#"{"web-modules": []}"#,           // not an object
+            r#"{"web-modules": {"mount": 5}}"#, // wrong scalar type
+            r#"{"web-modules": {"scss": 3}}"#,  // processor not bool/object
+            r#"{ not json "#,                   // malformed JSON
         ] {
             let dir = write_pkg(bad);
             assert!(
@@ -836,20 +809,6 @@ mod tests {
         assert_eq!(pick(None::<&str>, None, "c"), "c");
         assert_eq!(pick_vec(vec!["a"], vec!["b"]), ["a"]);
         assert_eq!(pick_vec(Vec::<&str>::new(), vec!["b"]), ["b"]);
-    }
-
-    #[test]
-    fn resolve_decorators_precedence() {
-        use web_modules::typescript::{Decorators, DecoratorsArg};
-        assert_eq!(
-            resolve_decorators(Some(DecoratorsArg::Standard), Some(Decorators::Lit)),
-            Decorators::Standard // CLI wins
-        );
-        assert_eq!(
-            resolve_decorators(None, Some(Decorators::Standard)),
-            Decorators::Standard // block
-        );
-        assert_eq!(resolve_decorators(None, None), Decorators::Lit); // default
     }
 
     #[test]
