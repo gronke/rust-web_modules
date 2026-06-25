@@ -93,8 +93,10 @@ oxc_span = { version = "0.137", optional = true }
 oxc_minifier = { version = "0.137", optional = true }
 oxc_isolated_declarations = { version = "0.137", optional = true }
 
-# SCSS + templating.
-grass = { version = "0.13", optional = true }
+# SCSS + templating. grass is used as a library only (SCSS→CSS); `default-features = false` drops its
+# `commandline` default (a clap-based CLI we never invoke) so the lean default/library path stays free
+# of the clap stack. `random` is kept (it's in grass's default — Sass `random()`), so SCSS is unchanged.
+grass = { version = "0.13", optional = true, default-features = false, features = ["random"] }
 tera = { version = "1", optional = true }
 
 # Icons (favicon / app icons) + i18n (XLIFF).
