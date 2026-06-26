@@ -147,6 +147,17 @@ impl PackageSpec {
         }
     }
 
+    /// Parse one positional npm spec — `name`, `name@range`, or `@scope/name@range`
+    /// (e.g. `lit`, `lit@^3`, `@lit/context@^1`) — into an [`npm`](Self::npm) spec.
+    /// The range `@` is the last one, so a leading scope `@` is preserved; a bare
+    /// `name` (no range) resolves to `name@*`. Infallible: any string yields a spec.
+    pub fn parse(spec: &str) -> Self {
+        match spec.rfind('@') {
+            Some(i) if i > 0 => Self::npm(&spec[..i], &spec[i + 1..]),
+            _ => Self::npm(spec, "*"),
+        }
+    }
+
     /// Override the subdirectory under the vendor root (and the import-map URL
     /// segment). Defaults to the package/repo name.
     pub fn dir(mut self, dir: impl Into<String>) -> Self {
@@ -726,6 +737,23 @@ fn join(mount: &str, dir: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_handles_bare_scoped_and_ranged() {
+        assert_eq!(PackageSpec::parse("lit").name(), "lit");
+        assert_eq!(PackageSpec::parse("lit@^3").name(), "lit");
+        assert_eq!(PackageSpec::parse("@lit/context").name(), "@lit/context");
+        assert_eq!(PackageSpec::parse("@lit/context@^1").name(), "@lit/context");
+        // The range is taken from after the last `@`; a bare name defaults to `*`.
+        assert!(matches!(
+            PackageSpec::parse("lit@^3").source,
+            Source::Npm { ref range, .. } if range == "^3"
+        ));
+        assert!(matches!(
+            PackageSpec::parse("lit").source,
+            Source::Npm { ref range, .. } if range == "*"
+        ));
+    }
 
     #[test]
     fn keep_filter_picks_browser_assets() {
