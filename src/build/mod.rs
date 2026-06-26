@@ -22,3 +22,10 @@ pub mod templates;
 mod pipeline;
 #[cfg(feature = "typescript")]
 pub use pipeline::*;
+
+// The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as
+// `web_modules::Build` (and `web_modules::build::Build`).
+#[cfg(feature = "typescript")]
+mod builder;
+#[cfg(feature = "typescript")]
+pub use builder::Build;

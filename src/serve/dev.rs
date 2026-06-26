@@ -34,43 +34,59 @@ use super::serving::{
     contained_file, content_type, has_source_extension, has_traversal, is_source_file,
     relative_under,
 };
+use crate::build::Processors;
+use crate::builder_shared::source_builder_methods;
 use crate::mount::Mount;
 
 type Cache = Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>;
 
-/// Which processors the dev server applies, mirroring the build pipeline's
-/// [`Processors`](crate::build::Processors) so `dev` and `build` stay in lock-step. No
-/// minify/gzip — those are build *output* options, meaningless for live serving.
+/// Which processors the dev server applies — **unified with the build pipeline's
+/// [`Processors`](crate::build::Processors)**, so `dev` and `build` configure the same set
+/// (minify/gzip are build *output* options in [`Output`](crate::build::Output), not here).
+/// This is a type alias kept for the historical `dev::DevConfig` name; build one with
+/// [`Processors::default`](crate::build::Processors) (all on, Lit decorators) and adjust
+/// fields, or use the [`Dev`] builder.
+pub type DevConfig = Processors;
+
+/// Fluent builder for the dev server: compile TS/SCSS on the fly, render `*.tera`, watch
+/// the source roots and live-reload the browser.
 ///
-/// `#[non_exhaustive]`: build from [`DevConfig::default`] (all on, Lit decorators) and
-/// adjust fields.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct DevConfig {
-    /// Compile `.ts`/`.tsx`/`.mts` → JS on the fly. Default on.
-    pub typescript: bool,
-    /// Compile `.scss` → CSS on the fly. Default on.
-    pub scss: bool,
-    /// Render `*.tera` to their stripped targets on the fly (`index.html.tera` served as
-    /// `index.html`). Default on.
-    pub tera: bool,
-    /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`].
-    ///
-    /// [`Decorators::Lit`]: crate::typescript::Decorators::Lit
-    pub ts_decorators: crate::typescript::Decorators,
-    /// Extra SCSS `@use`/`@import` load paths, on top of the mounted source dirs.
-    pub extra_scss_load_paths: Vec<PathBuf>,
+/// ```no_run
+/// use web_modules::Dev;
+///
+/// # async fn run() -> std::io::Result<()> {
+/// Dev::new().root("web").serve("127.0.0.1:8080".parse().unwrap()).await
+/// # }
+/// ```
+///
+/// Shared source inputs (`root`/`roots`, `typescript`/`scss`/`tera`, `decorators`,
+/// `scss_load_path(s)`) come from [`source_builder_methods!`](crate::builder_shared); the
+/// terminals are [`serve`](Self::serve) and [`router`](Self::router). For prefix-mounted
+/// composition (several dirs under different URL prefixes), use [`Frontend`](crate::Frontend).
+#[derive(Clone, Debug, Default)]
+pub struct Dev {
+    roots: Vec<PathBuf>,
+    processors: Processors,
 }
 
-impl Default for DevConfig {
-    fn default() -> Self {
-        Self {
-            typescript: true,
-            scss: true,
-            tera: true,
-            ts_decorators: crate::typescript::Decorators::Lit,
-            extra_scss_load_paths: Vec::new(),
-        }
+source_builder_methods!(Dev);
+
+impl Dev {
+    /// A new builder with no roots and all processors on (Lit decorators).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The dev [`Router`] (compile-on-the-fly, watch, live-reload) over the roots, each
+    /// mounted at `/` and resolved first-match-wins. Compose it into your own axum app, or
+    /// use [`serve`](Self::serve) to bind and run.
+    pub fn router(self) -> Router {
+        dev_router_with(self.roots, self.processors)
+    }
+
+    /// Bind `addr` and serve [`router`](Self::router) until the process stops.
+    pub async fn serve(self, addr: SocketAddr) -> std::io::Result<()> {
+        serve_with(self.roots, addr, self.processors).await
     }
 }
 
