@@ -202,32 +202,6 @@ impl CompilerConfig {
     }
 }
 
-impl ResolvedCompiler {
-    /// Map to the build pipeline's [`Processors`](web_modules::build::Processors). `#[non_exhaustive]`,
-    /// so built from `default()` and assigned (minify/gzip live in `Output`, not here).
-    fn into_processors(self) -> web_modules::build::Processors {
-        let mut p = web_modules::build::Processors::default();
-        p.typescript = self.typescript;
-        p.scss = self.scss;
-        p.tera = self.tera;
-        p.ts_decorators = self.ts_decorators;
-        p.extra_scss_load_paths = self.extra_scss_load_paths;
-        p
-    }
-
-    /// Map to the dev server's [`DevConfig`](web_modules::dev::DevConfig) (no minify/gzip — those
-    /// are build *output* options).
-    fn into_dev_config(self) -> web_modules::dev::DevConfig {
-        let mut c = web_modules::dev::DevConfig::default();
-        c.typescript = self.typescript;
-        c.scss = self.scss;
-        c.tera = self.tera;
-        c.ts_decorators = self.ts_decorators;
-        c.extra_scss_load_paths = self.extra_scss_load_paths;
-        c
-    }
-}
-
 /// Default `roots` to the current dir when none were given (matching the dev server and the old
 /// `compile` command).
 fn roots_or_cwd(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -235,15 +209,6 @@ fn roots_or_cwd(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
         roots.push(PathBuf::from("."));
     }
     roots
-}
-
-/// Parse one positional vendor spec: `name`, `name@range`, or `@scope/name@range`; the range
-/// `@` is the last one, so a leading scope `@` is preserved.
-fn parse_spec(p: &str) -> PackageSpec {
-    match p.rfind('@') {
-        Some(i) if i > 0 => PackageSpec::npm(&p[..i], &p[i + 1..]),
-        _ => PackageSpec::npm(p, "*"),
-    }
 }
 
 /// Build vendor's spec set from positional/`--package` specs plus each `--manifest` package.json's
@@ -254,11 +219,7 @@ fn build_vendor_specs(
     manifests: &[PathBuf],
     require_nonempty: bool,
 ) -> Res<Vec<PackageSpec>> {
-    let mut specs: Vec<PackageSpec> = packages
-        .iter()
-        .map(String::as_str)
-        .map(parse_spec)
-        .collect();
+    let mut specs: Vec<PackageSpec> = packages.iter().map(|p| PackageSpec::parse(p)).collect();
     // Each `--manifest` package.json's `dependencies`, via the same helper build scripts use.
     for path in manifests {
         specs.extend(web_modules::vendor::specs_from_package_json(path)?);
@@ -422,11 +383,19 @@ async fn main() -> Res {
         } => {
             // Config from a `web_modules` block in ./package.json (flags only — dev never vendors).
             let (cfg, _pkg_path) = load_pkg_config()?;
-            let config = compiler.resolve_with(&cfg).into_dev_config();
+            let resolved = compiler.resolve_with(&cfg);
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
             let addr =
                 addr.unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default addr"));
-            web_modules::dev::serve_with(roots, addr, config).await?;
+            web_modules::Dev::new()
+                .roots(roots)
+                .typescript(resolved.typescript)
+                .scss(resolved.scss)
+                .tera(resolved.tera)
+                .decorators(resolved.ts_decorators)
+                .scss_load_paths(resolved.extra_scss_load_paths)
+                .serve(addr)
+                .await?;
         }
         Command::Build {
             roots,
@@ -441,9 +410,6 @@ async fn main() -> Res {
             // Config from a `web_modules` block in ./package.json, layered under the CLI/env args.
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
-            let (minify, gzip) = (resolved.minify, resolved.gzip);
-            let output = web_modules::build::Output::new(minify, gzip);
-            let processors = resolved.into_processors();
 
             // Auto-vendor: the discovered package.json acts as an implicit `--manifest`, so its
             // `dependencies` (honoring `web_modules.webDependencies`) are vendored. Explicit
@@ -462,21 +428,32 @@ async fn main() -> Res {
             let html = pick(html, cfg.html, DEFAULT_HTML.to_string());
             let template = template.or(cfg.template);
 
-            web_modules::build::build(&web_modules::build::BuildOptions {
-                specs: &specs,
-                roots: &roots,
-                out: &out,
-                mount: &mount,
-                html: &html,
-                template: template.as_deref(),
-                processors,
-                output,
-            })?;
+            // Snapshot the figures for the summary before the builder consumes the inputs.
+            let (root_count, spec_count) = (roots.len(), specs.len());
+            let (minify, gzip) = (resolved.minify, resolved.gzip);
+            let out_display = out.display().to_string();
+            let mount_display = mount.clone();
+
+            let mut builder = web_modules::Build::new()
+                .roots(roots)
+                .out(out)
+                .mount(mount)
+                .html(html)
+                .vendor_specs(specs)
+                .typescript(resolved.typescript)
+                .scss(resolved.scss)
+                .tera(resolved.tera)
+                .decorators(resolved.ts_decorators)
+                .scss_load_paths(resolved.extra_scss_load_paths)
+                .minify(minify)
+                .gzip(gzip);
+            if let Some(template) = template {
+                builder = builder.template(template);
+            }
+            builder.run()?;
+
             println!(
-                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{})",
-                roots.len(),
-                out.display(),
-                specs.len(),
+                "built {root_count} root(s) → {out_display} ({spec_count} package spec(s), mount {mount_display}{}{})",
                 if minify { ", minified" } else { "" },
                 if gzip { ", gzipped" } else { "" },
             );
@@ -534,14 +511,6 @@ mod tests {
             Command::Build { compiler, .. } => compiler.resolve_with(&PkgConfig::default()),
             _ => panic!("expected Build"),
         }
-    }
-
-    #[test]
-    fn parse_spec_handles_bare_scoped_and_ranged() {
-        assert_eq!(parse_spec("lit").name(), "lit");
-        assert_eq!(parse_spec("lit@^3").name(), "lit");
-        assert_eq!(parse_spec("@lit/context").name(), "@lit/context");
-        assert_eq!(parse_spec("@lit/context@^1").name(), "@lit/context");
     }
 
     #[test]
