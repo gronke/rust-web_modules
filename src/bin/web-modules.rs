@@ -202,6 +202,21 @@ impl CompilerConfig {
     }
 }
 
+impl ResolvedCompiler {
+    /// Map to the build pipeline's [`Processors`](web_modules::build::Processors) — also the dev
+    /// server's `DevConfig` (a type alias for the same struct). `#[non_exhaustive]`, so built from
+    /// `default()` and assigned (minify/gzip live in `Output`, not here).
+    fn into_processors(self) -> web_modules::build::Processors {
+        let mut p = web_modules::build::Processors::default();
+        p.typescript = self.typescript;
+        p.scss = self.scss;
+        p.tera = self.tera;
+        p.ts_decorators = self.ts_decorators;
+        p.extra_scss_load_paths = self.extra_scss_load_paths;
+        p
+    }
+}
+
 /// Default `roots` to the current dir when none were given (matching the dev server and the old
 /// `compile` command).
 fn roots_or_cwd(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -383,19 +398,11 @@ async fn main() -> Res {
         } => {
             // Config from a `web_modules` block in ./package.json (flags only — dev never vendors).
             let (cfg, _pkg_path) = load_pkg_config()?;
-            let resolved = compiler.resolve_with(&cfg);
+            let config = compiler.resolve_with(&cfg).into_processors();
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
             let addr =
                 addr.unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default addr"));
-            web_modules::Dev::new()
-                .roots(roots)
-                .typescript(resolved.typescript)
-                .scss(resolved.scss)
-                .tera(resolved.tera)
-                .decorators(resolved.ts_decorators)
-                .scss_load_paths(resolved.extra_scss_load_paths)
-                .serve(addr)
-                .await?;
+            web_modules::dev::serve_with(roots, addr, config).await?;
         }
         Command::Build {
             roots,
@@ -410,6 +417,9 @@ async fn main() -> Res {
             // Config from a `web_modules` block in ./package.json, layered under the CLI/env args.
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
+            let (minify, gzip) = (resolved.minify, resolved.gzip);
+            let output = web_modules::build::Output::new(minify, gzip);
+            let processors = resolved.into_processors();
 
             // Auto-vendor: the discovered package.json acts as an implicit `--manifest`, so its
             // `dependencies` (honoring `web_modules.webDependencies`) are vendored. Explicit
@@ -428,32 +438,23 @@ async fn main() -> Res {
             let html = pick(html, cfg.html, DEFAULT_HTML.to_string());
             let template = template.or(cfg.template);
 
-            // Snapshot the figures for the summary before the builder consumes the inputs.
-            let (root_count, spec_count) = (roots.len(), specs.len());
-            let (minify, gzip) = (resolved.minify, resolved.gzip);
-            let out_display = out.display().to_string();
-            let mount_display = mount.clone();
-
-            let mut builder = web_modules::Build::new()
-                .roots(roots)
-                .out(out)
-                .mount(mount)
-                .html(html)
-                .vendor_specs(specs)
-                .typescript(resolved.typescript)
-                .scss(resolved.scss)
-                .tera(resolved.tera)
-                .decorators(resolved.ts_decorators)
-                .scss_load_paths(resolved.extra_scss_load_paths)
-                .minify(minify)
-                .gzip(gzip);
-            if let Some(template) = template {
-                builder = builder.template(template);
-            }
-            builder.run()?;
-
+            // Internal code builds via the explicit `BuildOptions` struct; the `Build` builder is
+            // the developer-facing wrapper over this same call.
+            web_modules::build::build(&web_modules::build::BuildOptions {
+                specs: &specs,
+                roots: &roots,
+                out: &out,
+                mount: &mount,
+                html: &html,
+                template: template.as_deref(),
+                processors,
+                output,
+            })?;
             println!(
-                "built {root_count} root(s) → {out_display} ({spec_count} package spec(s), mount {mount_display}{}{})",
+                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{})",
+                roots.len(),
+                out.display(),
+                specs.len(),
                 if minify { ", minified" } else { "" },
                 if gzip { ", gzipped" } else { "" },
             );
