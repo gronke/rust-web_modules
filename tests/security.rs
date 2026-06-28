@@ -14,6 +14,8 @@
 //!      (macOS, Windows) would otherwise open the on-disk source. Tests pin this with
 //!      literally upper-cased filenames so they reproduce on case-sensitive CI too.
 //!   3. The dev router serves only compiled output, and the output doesn't leak source.
+//!   4. Config / secret / dotfile paths (the default reject list) are refused with a 404 on
+//!      both the static and dev routers, while the allow-listed `.well-known` stays reachable.
 //!
 //! Needs the `dev` feature (for [`Frontend::dev`]); run under `--all-features`.
 #![cfg(feature = "dev")]
@@ -191,4 +193,90 @@ async fn dev_router_hides_ts_source_and_serves_compiled_js() {
     let (status, ct, _) = get(app, "/main.js").await;
     assert_eq!(status, StatusCode::OK);
     assert!(ct.contains("javascript"), "content-type was {ct}");
+}
+
+/// Promise 4: the static router refuses config / secret / dotfile paths (the default reject
+/// list = all presets) with a 404, never leaking their contents, while ordinary assets and the
+/// allow-listed `.well-known` stay reachable.
+#[tokio::test]
+async fn static_router_rejects_config_secret_and_dotfiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(&tmp.path().join("index.html"), b"<h1>ok</h1>");
+    write(
+        &tmp.path().join("package.json"),
+        b"{ \"x\": \"SECRET-PKG\" }",
+    );
+    write(&tmp.path().join(".env"), b"SECRET-ENV=1");
+    write(&tmp.path().join(".git/config"), b"SECRET-GIT");
+    write(&tmp.path().join(".well-known/security.txt"), b"contact: x");
+    let app = Frontend::dir(tmp.path()).router();
+
+    for (uri, marker) in [
+        ("/package.json", "SECRET-PKG"),
+        ("/.env", "SECRET-ENV"),
+        ("/.git/config", "SECRET-GIT"),
+    ] {
+        let (status, _, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be rejected");
+        assert!(!contains(&body, marker), "{uri} leaked its contents");
+    }
+    // The allow-listed dotdir and ordinary assets are still served.
+    let (status, ..) = get(app.clone(), "/.well-known/security.txt").await;
+    assert_eq!(status, StatusCode::OK, ".well-known must stay reachable");
+    let (status, ..) = get(app, "/index.html").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Promise 4 for the dev router: the same config / secret / dotfile paths 404 there too.
+#[tokio::test]
+async fn dev_router_rejects_config_secret_and_dotfiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(&tmp.path().join("index.html"), b"<h1>ok</h1>");
+    write(
+        &tmp.path().join("package.json"),
+        b"{ \"x\": \"SECRET-PKG\" }",
+    );
+    write(&tmp.path().join(".env"), b"SECRET-ENV=1");
+    write(&tmp.path().join(".git/config"), b"SECRET-GIT");
+    let app = Frontend::dir(tmp.path()).dev();
+
+    for (uri, marker) in [
+        ("/package.json", "SECRET-PKG"),
+        ("/.env", "SECRET-ENV"),
+        ("/.git/config", "SECRET-GIT"),
+    ] {
+        let (status, _, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be rejected");
+        assert!(!contains(&body, marker), "{uri} leaked its contents");
+    }
+    // An ordinary asset is unaffected.
+    let (status, ..) = get(app, "/index.html").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// The `reject_preset` / `reject` builder methods select what the router refuses: `CONFIG`
+/// alone drops `package.json` but leaves the (preset-uncovered) dotfile-free assets reachable,
+/// and an explicit `reject` pattern adds one more path on top of the selection.
+#[tokio::test]
+async fn reject_preset_and_pattern_select_what_is_refused() {
+    use web_modules::reject::Presets;
+    let tmp = tempfile::tempdir().unwrap();
+    write(&tmp.path().join("package.json"), b"{}");
+    write(&tmp.path().join("notes.txt"), b"plain");
+    write(&tmp.path().join(".htpasswd"), b"SECRET-PW");
+    let app = Frontend::dir(tmp.path())
+        .reject_preset(Presets::CONFIG)
+        .reject(".htpasswd")
+        .router();
+
+    // The CONFIG preset drops the manifest.
+    let (status, ..) = get(app.clone(), "/package.json").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // The explicit pattern drops `.htpasswd` (the `hidden` preset is off here).
+    let (status, _, body) = get(app.clone(), "/.htpasswd").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!contains(&body, "SECRET-PW"));
+    // A plain asset that no rule covers is served.
+    let (status, ..) = get(app, "/notes.txt").await;
+    assert_eq!(status, StatusCode::OK);
 }
