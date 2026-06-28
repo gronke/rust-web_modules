@@ -77,6 +77,18 @@ inputs:
     description: Write .gz sidecars next to assets (true/false). The released binary includes the `compress` feature, so this works.
     required: false
     default: "false"
+  reject-preset:
+    description: >-
+      Which reject presets keep config / secret / source paths out of the built output, e.g. `all`
+      (the default), `all,!config`, `source,hidden`, or `none`. Empty uses the binary's `all` default.
+    required: false
+    default: ""
+  reject-list:
+    description: >-
+      Space-separated explicit reject patterns (`*.ext`, `name/`, or an exact `name`) that fully
+      replace the presets, e.g. ".env .git/ *.php". Empty leaves the presets in effect.
+    required: false
+    default: ""
   version:
     description: >-
       Which released `web-modules` to download (a version like 0.3 / 0.3.1, a tag like v0.3.1, or
@@ -240,6 +252,8 @@ runs:
         INPUT_MANIFEST: ${{ inputs.manifest }}
         INPUT_TEMPLATE: ${{ inputs.template }}
         INPUT_HTML: ${{ inputs.html }}
+        INPUT_REJECT_PRESET: ${{ inputs.reject-preset }}
+        INPUT_REJECT_LIST: ${{ inputs.reject-list }}
       run: |
         # Fail clearly on a missing source dir — almost always a forgotten actions/checkout or a
         # wrong `src` — rather than surfacing a lower-level error from the binary.
@@ -268,6 +282,13 @@ runs:
           read -ra pkgs <<< "$INPUT_PACKAGES"
           for p in "${pkgs[@]}"; do args+=(--package "$p"); done
         fi
+        # Reject list: a preset expression (omit → the binary's `all` default), and/or explicit
+        # patterns that fully replace the presets (each a repeatable `--reject-list`).
+        if [ -n "$INPUT_REJECT_PRESET" ]; then args+=(--reject-preset "$INPUT_REJECT_PRESET"); fi
+        if [ -n "$INPUT_REJECT_LIST" ]; then
+          read -ra rejects <<< "$INPUT_REJECT_LIST"
+          for r in "${rejects[@]}"; do args+=(--reject-list "$r"); done
+        fi
         # The source dir is a positional root.
         web-modules build "$INPUT_SRC" "${args[@]}"
 
@@ -284,6 +305,8 @@ runs:
           [ -n "$manifest" ] && echo "| manifest | \`$manifest\` |"
           [ -n "$INPUT_TEMPLATE" ] && echo "| template | \`$INPUT_TEMPLATE\` |"
           echo "| minify · gzip | \`$INPUT_MINIFY\` · \`$INPUT_GZIP\` |"
+          [ -n "$INPUT_REJECT_PRESET" ] && echo "| reject-preset | \`$INPUT_REJECT_PRESET\` |"
+          [ -n "$INPUT_REJECT_LIST" ] && echo "| reject-list | \`$INPUT_REJECT_LIST\` |"
           echo ""
           if [ -d "$INPUT_OUT" ]; then
             files=$(find "$INPUT_OUT" -type f | wc -l | tr -d ' ')
