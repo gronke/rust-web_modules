@@ -238,6 +238,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: du -sh ~/.cargo/registry ~/.cargo/git src-tauri/target 2>/dev/null || true
 
+  # Compile on the DECLARED MSRV (Cargo.toml's rust-version) on every PR + push to main, so a
+  # dependency that raises its own MSRV is caught here — not only by release.yml at tag time, which is
+  # too late (it runs after the tag). Reads the version from Cargo.toml so the CI toolchain and the
+  # declared MSRV can't drift apart. Resolves deps unlocked, matching what a fresh `cargo install` gets.
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check on the declared MSRV
+        uses: gronke/rust-ci/.github/actions/msrv@main
+        with:
+          package: web_modules
+          features: --features full
+
   # Lint the workflow files with the official actionlint image (which bundles shellcheck for the
   # `run:` blocks). actionlint targets *workflows*; the composite `action.yml` is a different schema
   # it can't parse, so that file's embedded bash is reviewed by hand instead. Tracks `:latest`
