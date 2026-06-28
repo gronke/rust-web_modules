@@ -40,11 +40,11 @@ jobs:
       - uses: actions/checkout@v7
 
       # windows-11-arm ships no Rust (actions/partner-runner-images#77); every other runner has one
-      # preinstalled. The shared cicd-rust action bootstraps the arch-appropriate rustup when none is
-      # present (a no-op otherwise) — consistent with ci.yml's use of cicd-rust's rust-cache.
+      # preinstalled. The shared rust-ci action bootstraps the arch-appropriate rustup when none is
+      # present (a no-op otherwise) — consistent with ci.yml's use of rust-ci's rust-cache.
       - name: Ensure Rust toolchain (windows-11-arm ships none)
         if: ${{ matrix.slug == 'windows-arm64' }}
-        uses: gronke/cicd-rust/.github/actions/install-toolchain@main
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
 
       # Build the full lean toolchain (cli + env + compress + icons/dts/i18n/npm/dev; only the heavy
       # `bundle`/rolldown is excluded) in release mode, reproducibly — `--locked` uses the committed
