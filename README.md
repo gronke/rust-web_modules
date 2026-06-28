@@ -63,7 +63,7 @@ Options:
 
 ```toml
 [dependencies]
-web_modules = "0.3"   # Rust 1.94+
+web_modules = "0.4"   # Rust 1.94+
 ```
 
 `typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.
