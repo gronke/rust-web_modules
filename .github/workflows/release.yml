@@ -25,10 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: MSRV check (verifies the declared rust-version, 1.94)
-        run: |
-          rustup toolchain install 1.94 --profile minimal
-          cargo +1.94 check -p web_modules --features full
+      - name: MSRV check (compiles on the declared rust-version)
+        uses: gronke/rust-ci/.github/actions/msrv@main
+        with:
+          package: web_modules
+          features: --features full
 
       - name: Package contents
         run: cargo package -p web_modules --list
