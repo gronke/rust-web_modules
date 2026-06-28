@@ -5,6 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Per-release notes are also published on each [GitHub Release](https://github.com/gronke/web_modules/releases) (sourced from the annotated tag) and on [crates.io](https://crates.io/crates/web_modules).
 
+## [0.4.0] - 2026-06-28
+
+### Added
+
+- Fluent `Build` / `Dev` builders (`web_modules::Build` / `Dev`), behind a default-on `builder` feature.
+- Zero-config `web_modules` block in `package.json` drives `dev` / `build`; `build` auto-vendors its `dependencies`.
+- `PackageSpec::parse`; `web_modules::Decorators` at the crate root.
+
+### Changed
+
+- `build` is the static counterpart of `dev`: positional `[ROOTS]…`, `--out` (default `dist`), vendoring only when given packages/manifests.
+- Processor-agnostic pipeline — `build()` / `BuildOptions` / `Processors` need no `typescript`; `DevConfig` aliases `Processors`.
+- npm-utils 0.5.3 (native TLS roots, stricter sha512 integrity, hardened extraction); drop grass's clap CLI from the default build.
+
+### Removed
+
+- The `compile` command (folded into `build`).
+
 ## [0.3.0] - 2026-06-24
 
 ### Added
@@ -40,6 +58,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - Initial release: a pure-Rust, buildless toolchain for ES modules and Web Components.
 
+[0.4.0]: https://github.com/gronke/web_modules/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gronke/web_modules/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gronke/web_modules/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/gronke/web_modules/releases/tag/v0.1.0
