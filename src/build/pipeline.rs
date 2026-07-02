@@ -274,20 +274,70 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Bare module specifiers from an emitted module's `import`/`export … from` and
-/// dynamic `import()` statements (covers oxc codegen's output forms).
+/// Module specifiers from an emitted module's `import` / `export … from` statements
+/// and dynamic `import()` calls.
+///
+/// With the `typescript` feature the static forms come from the parsed AST, so a
+/// specifier is only seen when it is a real module request — comments or strings that
+/// merely contain `import "x"` no longer register (a false-positive the substring scan
+/// hit), and the space-less forms a minifier emits (`import"x"`, `export{…}from"x"`)
+/// are found where the substring scan, keyed on `import "` / `from "`, missed them.
+/// Dynamic `import()` keeps its parenthesis through minification, so it is matched
+/// lexically either way. Without the feature there is no transform (and so no minified
+/// output), and the whole scan is lexical.
 fn module_specifiers(js: &str) -> Vec<String> {
-    const PATTERNS: &[&str] = &[
-        "from \"",
-        "from '",
-        "import \"",
-        "import '",
-        "import(\"",
-        "import('",
-    ];
     let mut specs = Vec::new();
-    for pat in PATTERNS {
-        // Every pattern ends in its quote char; skip defensively if one were empty.
+    #[cfg(feature = "typescript")]
+    static_specifiers_ast(js, &mut specs);
+    #[cfg(not(feature = "typescript"))]
+    static_specifiers_lexical(js, &mut specs);
+    dynamic_specifiers_lexical(js, &mut specs);
+    specs
+}
+
+/// Static `import`/`export … from` specifiers, from the parsed AST's top-level module
+/// statements. Best-effort: a module that fails to parse contributes nothing rather
+/// than erroring — the transform pass already reports real parse failures.
+#[cfg(feature = "typescript")]
+fn static_specifiers_ast(js: &str, specs: &mut Vec<String>) {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, js, SourceType::mjs()).parse();
+    for stmt in &parsed.program.body {
+        match stmt {
+            Statement::ImportDeclaration(decl) => specs.push(decl.source.value.to_string()),
+            Statement::ExportAllDeclaration(decl) => specs.push(decl.source.value.to_string()),
+            Statement::ExportNamedDeclaration(decl) => {
+                if let Some(source) = &decl.source {
+                    specs.push(source.value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Static specifiers via substring scan — the fallback when the crate is built without
+/// the `typescript` feature (and thus without a minifier, so sources keep their spaces).
+#[cfg(not(feature = "typescript"))]
+fn static_specifiers_lexical(js: &str, specs: &mut Vec<String>) {
+    scan_quoted(js, &["from \"", "from '", "import \"", "import '"], specs);
+}
+
+/// Dynamic `import("…")` / `import('…')` specifiers. The call parenthesis survives
+/// minification, so a substring scan matches both the spaced and space-less forms.
+fn dynamic_specifiers_lexical(js: &str, specs: &mut Vec<String>) {
+    scan_quoted(js, &["import(\"", "import('"], specs);
+}
+
+/// Push the quoted string following each occurrence of any pattern (each pattern ends
+/// in its opening quote; the value runs to the next matching quote).
+fn scan_quoted(js: &str, patterns: &[&str], specs: &mut Vec<String>) {
+    for pat in patterns {
         let Some(quote) = pat.chars().last() else {
             continue;
         };
@@ -303,7 +353,6 @@ fn module_specifiers(js: &str) -> Vec<String> {
             }
         }
     }
-    specs
 }
 
 /// A *bare* specifier (resolved via the import map), not a relative/absolute/URL one.
@@ -477,6 +526,45 @@ mod tests {
         assert!(specs.contains(&"bootstrap".to_string()));
         assert!(is_bare("lit") && is_bare("@oxc-project/runtime/helpers/decorate"));
         assert!(!is_bare("./local.js") && !is_bare("/x.js") && !is_bare("https://h/y.js"));
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn scanner_finds_minified_space_less_forms() {
+        // What the minifier emits: no space after `import`/`from`, and a re-export.
+        // The old substring scan keyed on `import "` / `from "` missed all of these,
+        // so the transform-runtime helper went unvendored under --minify.
+        let js = "import\"@oxc-project/runtime/helpers/decorate\";\
+                  import{a as b}from\"lit\";\
+                  export{x}from\"bootstrap\";\
+                  const m=import(\"lit-html\");";
+        let specs = module_specifiers(js);
+        for want in [
+            "@oxc-project/runtime/helpers/decorate",
+            "lit",
+            "bootstrap",
+            "lit-html",
+        ] {
+            assert!(
+                specs.contains(&want.to_string()),
+                "missing {want:?} in {specs:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn scanner_ignores_imports_in_comments_and_strings() {
+        // A shim documenting the import it replaces, and a log line quoting one — the
+        // substring scan flagged both as unresolved bare imports (the reported bug).
+        let js = "// Satisfies `import nodeCrypto from \"crypto\"` in the browser.\n\
+                  const msg = 'import \"nope\" failed';\n\
+                  export default {};";
+        let specs = module_specifiers(js);
+        assert!(
+            !specs.iter().any(|s| s == "crypto" || s == "nope"),
+            "comment/string text must not register as imports; got {specs:?}"
+        );
     }
 
     #[test]

@@ -5,6 +5,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Per-release notes are also published on each [GitHub Release](https://github.com/gronke/web_modules/releases) (sourced from the annotated tag) and on [crates.io](https://crates.io/crates/web_modules).
 
+## [Unreleased]
+
+### Fixed
+
+- fix(build): find import specifiers in minified output by reading the AST
+
 ## [0.4.0] - 2026-06-28
 
 ### Added

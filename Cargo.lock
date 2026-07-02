@@ -4112,6 +4112,7 @@ dependencies = [
  "notify",
  "npm-utils",
  "oxc_allocator",
+ "oxc_ast",
  "oxc_codegen",
  "oxc_isolated_declarations",
  "oxc_minifier",
