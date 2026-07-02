@@ -5,6 +5,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Per-release notes are also published on each [GitHub Release](https://github.com/gronke/web_modules/releases) (sourced from the annotated tag) and on [crates.io](https://crates.io/crates/web_modules).
 
+## [Unreleased]
+
+### Added
+
+- `build` validates the import map the page actually ships: with a static `index.html` carrying an inline `<script type="importmap">`, the unresolved-bare-import check runs against that (authoritative) map, and inline entries must agree with the generated map's targets, compared mount-agnostically. Multiple inline maps merge with the browser's first-wins rule (`Importmap::from_inline_html`, `Importmap::from_json_str`).
+
 ## [0.4.0] - 2026-06-28
 
 ### Added
